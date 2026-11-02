@@ -112,6 +112,32 @@ describe("codexAppServerConnect", () => {
         }
     });
 
+    it("shows the paths and diffs a file change approval would write", async () => {
+        const asked: acp.RequestPermissionRequest[] = [];
+        const connection = await connect([], async (params) => {
+            asked.push(params);
+            return { outcome: { outcome: "selected", optionId: "decline" } };
+        });
+        try {
+            const { sessionId } = await connection.conn.newSession({
+                cwd: tmpdir(),
+                mcpServers: [],
+            });
+            await connection.conn.prompt({ sessionId, prompt: [{ type: "text", text: "edit" }] });
+            expect(asked).toHaveLength(1);
+            expect(asked[0]!.toolCall).toMatchObject({
+                toolCallId: "fc-1",
+                title: "Edit /workspace/a.txt",
+                rawInput: {
+                    method: "item/fileChange/requestApproval",
+                    changes: [{ path: "/workspace/a.txt", kind: { type: "add" }, diff: "hello\n" }],
+                },
+            });
+        } finally {
+            connection.terminate();
+        }
+    });
+
     it("relays an allow once as accept", async () => {
         const texts: string[] = [];
         const connection = await connect(

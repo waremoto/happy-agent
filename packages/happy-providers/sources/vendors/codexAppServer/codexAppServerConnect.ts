@@ -80,6 +80,8 @@ class CodexAppServer implements AcpAgentConnection {
     readonly #pending = new Map<number, { resolve(v: unknown): void; reject(e: Error): void }>();
     readonly #threads = new Map<string, CodexThread>();
     readonly #updates = codexItemUpdates();
+    /** File changes Codex has started and not completed, by item ID: what approving one changes. */
+    readonly #fileChanges = new Map<string, unknown[]>();
     #nextId = 1;
     #notifications: Promise<void> = Promise.resolve();
     #stderr = "";
@@ -351,6 +353,9 @@ class CodexAppServer implements AcpAgentConnection {
         }
         // In arrival order: a turn must not end before the updates Codex sent ahead of its end.
         const params = message.params as Record<string, unknown>;
+        // Recorded now, not in the queue: Codex asks about a change right after starting it, and
+        // the question is answered without waiting for the queue.
+        this.#rememberFileChange(message.method, params);
         this.#notifications = this.#notifications
             .then(() => this.#notify(message.method!, params))
             .catch(() => undefined);
@@ -406,6 +411,16 @@ class CodexAppServer implements AcpAgentConnection {
         }
     }
 
+    #rememberFileChange(method: string, params: Record<string, unknown> | undefined): void {
+        const item = params?.["item"] as { type?: unknown; id?: unknown; changes?: unknown };
+        if (item?.type !== "fileChange" || typeof item.id !== "string") return;
+        if (method === "item/started") {
+            this.#fileChanges.set(item.id, Array.isArray(item.changes) ? item.changes : []);
+        } else if (method === "item/completed") {
+            this.#fileChanges.delete(item.id);
+        }
+    }
+
     /** Codex asks before acting only when a policy demands it; Happy's permission mode decides. */
     async #answer(id: number | string, method: string, params: unknown): Promise<void> {
         if (
@@ -426,15 +441,27 @@ class CodexAppServer implements AcpAgentConnection {
             cwd?: string;
             reason?: string;
         };
-        // Everything Codex sent except its routing IDs is what the person approves.
+        // Everything Codex sent except its routing IDs is what the person approves. A file change
+        // request names only its item, so the paths and diffs come from that item's start.
         const { threadId: _thread, turnId: _turn, itemId: _item, ...action } = request;
+        const changes =
+            method === "item/fileChange/requestApproval"
+                ? this.#fileChanges.get(request.itemId)
+                : undefined;
+        const paths = (changes ?? [])
+            .map((change) => (change as { path?: unknown }).path)
+            .filter((path): path is string => typeof path === "string");
         const answer = await Promise.resolve(
             this.#client.requestPermission({
                 sessionId: request.threadId,
                 toolCall: {
                     toolCallId: request.itemId,
-                    title: request.command ?? request.reason ?? method,
-                    rawInput: { method, ...action },
+                    title:
+                        request.command ??
+                        (paths.length > 0 ? `Edit ${paths.join(", ")}` : undefined) ??
+                        request.reason ??
+                        method,
+                    rawInput: { method, ...action, ...(changes === undefined ? {} : { changes }) },
                 },
                 options: [
                     { optionId: "accept", name: "Allow", kind: "allow_once" },

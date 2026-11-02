@@ -51,6 +51,42 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         case "turn/start": {
             const text = message.params.input.map((item) => item.text ?? "").join("");
             reply({ turn: { id: "turn1" } });
+            if (text.includes("edit")) {
+                // As Codex does: the change starts as an item, then the approval names only it.
+                approval = { policy: message.params.approvalPolicy };
+                send({
+                    method: "item/started",
+                    params: {
+                        threadId: "t1",
+                        turnId: "turn1",
+                        item: {
+                            type: "fileChange",
+                            id: "fc-1",
+                            status: "inProgress",
+                            changes: [
+                                {
+                                    path: "/workspace/a.txt",
+                                    kind: { type: "add" },
+                                    diff: "hello\n",
+                                },
+                            ],
+                        },
+                    },
+                });
+                send({
+                    id: "approve-1",
+                    method: "item/fileChange/requestApproval",
+                    params: {
+                        threadId: "t1",
+                        turnId: "turn1",
+                        itemId: "fc-1",
+                        startedAtMs: 1,
+                        reason: null,
+                        grantRoot: null,
+                    },
+                });
+                return;
+            }
             if (text.includes("ask")) {
                 approval = { policy: message.params.approvalPolicy };
                 send({
