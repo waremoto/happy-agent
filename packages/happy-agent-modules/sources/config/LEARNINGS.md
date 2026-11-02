@@ -551,3 +551,12 @@ which depends on presence, which depends on this module. User input therefore jo
 `useUserInput` once the runtime has built it, and turns read it lazily. Until it joins, and for any
 turn without an agent, native agents keep their mode's own answer, so nothing new is allowed by the
 seam's absence.
+
+## Attended-only is one switch that its readers cannot miss
+
+A host that supervises execution elsewhere needs Happy to start no work on its own. A list of
+separate switches left gaps: scheduled messages, goals, onboarding, subagents and Spaces had none.
+`[features] attended_only` now turns off workflows, the mobile connector, inference retries and
+peer messaging by rewriting the effective values, so every existing reader and `GET /v0/config`
+already agree. Paths with no switch of their own ask `attendedOnly`. Peer messaging settings
+changed while running cannot turn it back on, because the getter enforces the switch too.

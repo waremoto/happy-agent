@@ -670,6 +670,7 @@ const partialValuesSchema = Type.Object(
         features: Type.Optional(
             Type.Object(
                 {
+                    attended_only: Type.Optional(Type.Boolean()),
                     cross_workspace: Type.Optional(Type.Boolean()),
                     workflows: Type.Optional(Type.Boolean()),
                     workspaces: Type.Optional(Type.Boolean()),
@@ -1123,6 +1124,7 @@ const resolvedValuesSchema = Type.Object(
         ),
         features: Type.Object(
             {
+                attendedOnly: Type.Boolean(),
                 crossWorkspace: Type.Boolean(),
                 workflows: Type.Boolean(),
                 workspaces: Type.Boolean(),
@@ -1557,6 +1559,7 @@ const DEFAULT_VALUES: HappyAgentConfigValues = {
         permissionMode: "auto",
     },
     features: {
+        attendedOnly: false,
         crossWorkspace: true,
         workflows: true,
         workspaces: true,
@@ -2732,6 +2735,14 @@ export class ConfigModule implements AgentModule {
         };
     }
 
+    /**
+     * Whether agents start work only from a person's message. Modules whose self-starting work has
+     * no switch of its own ask this before starting it.
+     */
+    get attendedOnly(): boolean {
+        return this.configuration.values.features.attendedOnly;
+    }
+
     /** Whether phones may pair and connect directly; machine configuration only. */
     get mobileConnectorEnabled(): boolean {
         return this.configuration.values.feature.mobileConnector.enabled;
@@ -2799,7 +2810,9 @@ export class ConfigModule implements AgentModule {
     }
 
     get peerMessaging(): PeerMessagingConfig {
-        return structuredClone(this.#peerMessaging);
+        const settings = structuredClone(this.#peerMessaging);
+        // Settings changed while running cannot turn peer messaging back on when attended-only.
+        return this.attendedOnly ? { ...settings, enabled: false } : settings;
     }
 
     validatePeerMessaging(settings: PeerMessagingConfig): void {
@@ -4679,10 +4692,28 @@ function mergeValues(...partials: readonly PartialValues[]): HappyAgentConfigVal
     if (merged.runners !== undefined) merged.runners = validateRunners(merged.runners, merged);
     if (merged.execution !== undefined) validateExecution(merged);
     if (merged.peer_messaging !== undefined) validatePeerMessagingConfig(merged.peer_messaging);
+    if (merged.features.attendedOnly) applyAttendedOnly(merged);
     if (!Value.Check(happyAgentConfigValuesSchema, merged)) {
         throw new Error("The merged Happy Agent configuration is invalid.");
     }
     return deepFreeze(merged);
+}
+
+/**
+ * Attended-only turns off every switchable path that starts agent work without a person: the
+ * effective values say so, so every reader and `GET /v0/config` agree. Paths without a switch of
+ * their own ask `ConfigModule.attendedOnly`.
+ */
+function applyAttendedOnly(merged: {
+    features: { workflows: boolean };
+    feature: { mobileConnector: { enabled: boolean } };
+    settings: { inferenceMaxRetries: number };
+    peer_messaging?: { enabled?: boolean | undefined } | undefined;
+}): void {
+    merged.features.workflows = false;
+    merged.feature.mobileConnector.enabled = false;
+    merged.settings.inferenceMaxRetries = 0;
+    if (merged.peer_messaging !== undefined) merged.peer_messaging.enabled = false;
 }
 
 type MutableResolvedValues = {
@@ -4713,6 +4744,7 @@ function normalizeGemini(value: NonNullable<PartialValues["gemini"]>): Record<st
 
 function normalizeFeatures(value: NonNullable<PartialValues["features"]>): Record<string, unknown> {
     return {
+        ...(value.attended_only === undefined ? {} : { attendedOnly: value.attended_only }),
         ...(value.cross_workspace === undefined ? {} : { crossWorkspace: value.cross_workspace }),
         ...(value.workflows === undefined ? {} : { workflows: value.workflows }),
         ...(value.workspaces === undefined ? {} : { workspaces: value.workspaces }),
@@ -5418,6 +5450,7 @@ function calculateProvenance(...sources: readonly PartialValues[]): Record<strin
             service_tier: "serviceTier",
         },
         features: {
+            attended_only: "attendedOnly",
             cross_workspace: "crossWorkspace",
             workflows: "workflows",
             workspaces: "workspaces",
@@ -5588,9 +5621,10 @@ function readFeatures(
         value,
         "features",
         unknown,
-        ["cross_workspace", "workflows", "workspaces"],
+        ["attended_only", "cross_workspace", "workflows", "workspaces"],
         Type.Object(
             {
+                attended_only: Type.Optional(Type.Boolean()),
                 cross_workspace: Type.Optional(Type.Boolean()),
                 workflows: Type.Optional(Type.Boolean()),
                 workspaces: Type.Optional(Type.Boolean()),

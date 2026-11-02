@@ -1548,6 +1548,26 @@ Field groups:
 - `defaults` — what a new agent gets when it names nothing: provider, model, effort, and
   permission mode.
 - `features` — feature flags.
+
+    `features.attendedOnly` (machine configuration `[features] attended_only`, default `false`)
+    makes the installation attended-only: agents start work only from a person's own message,
+    and within a turn a person started. A host that supervises execution elsewhere, such as an
+    admission service, sets it. When it is `true`:
+
+    - workflows are off, and `features.workflows` reports `false`;
+    - `schedule_message` is not offered, and scheduled messages are neither armed nor delivered;
+    - a goal never starts another turn on its own;
+    - inference is not retried after a failed request;
+    - onboarding sends Happy no hidden instructions;
+    - peer messaging, exported bots, and the mobile connector are off;
+    - agents cannot create subagents or subtasks, or message bots and task agents;
+    - the Spaces prioritizing agent never wakes on its own.
+
+    A run that a daemon restart interrupted still resumes in the next process, and its durable
+    tool calls still complete, because that run was started by a person. `attendedOnly` is
+    additive and does not increment the protocol version; older daemons omit it, and clients
+    treat a missing value as `false`.
+
 - `mcpServers` — configured MCP servers by name. Only `enabled` and the transport kind
   (`"stdio"` or `"http"`) are exposed; commands, URLs, headers, and environment stay private.
 - `network` — the sandbox network policy: allowed and denied domains, allowed ports.

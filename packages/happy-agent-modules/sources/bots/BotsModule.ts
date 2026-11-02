@@ -593,6 +593,11 @@ export class BotsModule implements AgentModule {
         if (bot.agentId === fromAgentId) {
             throw new BotConflictError("A bot cannot send a message to itself.");
         }
+        if (this.#config.attendedOnly) {
+            throw new BotConflictError(
+                "This installation is attended-only: agents cannot message bots; ask the person.",
+            );
+        }
         if (
             this.#botSettings !== undefined &&
             !(await this.#botSettings.mayReach(ctx, fromAgentId, bot.agentId))

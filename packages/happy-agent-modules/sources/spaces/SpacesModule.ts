@@ -2629,6 +2629,8 @@ export class SpacesModule implements AgentModule {
         rows: readonly SidebarProposalNewRow[],
     ): Promise<{ spaceId: string; agentId: string }[]> {
         const started: { spaceId: string; agentId: string }[] = [];
+        // Attended-only: a proposed chat would start an agent no person asked for.
+        if (this.#config.attendedOnly) return started;
         const route = await this.#prioritizingRoute(ctx, ownerUserId);
         for (const row of rows) {
             if ((await querySpace(ctx, row.id)) !== undefined) continue;
@@ -2904,6 +2906,8 @@ export class SpacesModule implements AgentModule {
      * deciding, the wake waits for the end of that turn, so a burst makes one more run at most.
      */
     async #wake(ctx: Context, ownerUserId: SpaceOwnerId): Promise<void> {
+        // Attended-only: the Prioritizing agent works only when a person messages it.
+        if (this.#config.attendedOnly) return;
         await ctx.inTx(async (txCtx) => {
             const state = await queryOwnerState(txCtx, ownerUserId);
             if (state?.sidebarWakeAt === undefined) return;
@@ -4276,6 +4280,7 @@ export class SpacesModule implements AgentModule {
         text: string,
         operationId?: string,
     ): Promise<void> {
+        if (this.#config.attendedOnly) return;
         if ((await this.#livePrioritizing(ctx, ownerUserId)) === undefined) return;
         const state = await this.#ownerState(ctx, ownerUserId);
         const notices = state.sidebarBrief ?? [];

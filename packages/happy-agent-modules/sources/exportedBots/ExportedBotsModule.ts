@@ -874,7 +874,9 @@ export class ExportedBotsModule implements AgentModule {
             for (const [key, exportedBot] of saved) {
                 const bot = bots.find((candidate) => candidate.id === exportedBot.botId);
                 const adapter = this.#adapters.get(exportedBot.kind);
+                // Attended-only: an inbound chat would start a turn no person here asked for.
                 if (
+                    !this.#config.attendedOnly &&
                     exportedBot.enabled &&
                     bot?.status === "active" &&
                     adapter !== undefined &&

@@ -19,6 +19,7 @@ import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { afterCommit, type Context } from "@steve.kite/stdlib";
 
+import type { ConfigModule } from "../config/index.js";
 import {
     goalEventListenerSchema,
     goalEventSchema,
@@ -114,14 +115,22 @@ export class GoalModule implements AgentModule {
 
     readonly #mutations = new Map<string, Promise<void>>();
     readonly #history: HistoryModule | undefined;
+    readonly #config: ConfigModule | undefined;
     #agents: AgentSystemRef | undefined;
 
     /**
      * @param history The mutation the run that pursued the goal answers, carried on the
      * continuation that starts its next run. Without it, continuations carry none.
+     * @param config Whether the installation is attended-only; then a goal never starts a turn
+     * on its own, and the person continues it with their own message.
      */
-    constructor(history?: HistoryModule) {
+    constructor(history?: HistoryModule, config?: ConfigModule) {
         this.#history = history;
+        this.#config = config;
+    }
+
+    get #attendedOnly(): boolean {
+        return this.#config?.attendedOnly === true;
     }
 
     /** Subscribe inside the committing transaction; throwing there rolls the mutation back. */
@@ -292,6 +301,7 @@ export class GoalModule implements AgentModule {
         ctx: Context,
         scope: AgentModuleScope,
     ): Promise<readonly AgentModuleAction[] | undefined> {
+        if (this.#attendedOnly) return undefined;
         const continuation = await ctx.inTx(async (txCtx) => {
             const kv = goalKV(scope.agent.id);
             const observed = await scope.runKV.read(txCtx, GOAL_OBSERVED_LIFECYCLE_ID_KEY);
@@ -569,7 +579,7 @@ export class GoalModule implements AgentModule {
         goal: SessionGoal,
         external: boolean,
     ): Promise<void> {
-        if (!external) return;
+        if (!external || this.#attendedOnly) return;
         const agents = this.#agents;
         if (agents === undefined) {
             throw new Error("Goal agent system disappeared during activation.");

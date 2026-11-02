@@ -224,6 +224,8 @@ export type ConfigDefaults = Static<typeof configDefaultsSchema>;
 
 /** Which optional product areas are switched on. */
 export const configFeaturesSchema = Type.Object({
+    /** Agents start work only from a person's message. Absent from older daemons: `false`. */
+    attendedOnly: Type.Optional(Type.Boolean()),
     crossWorkspace: Type.Boolean(),
     workflows: Type.Boolean(),
     workspaces: Type.Boolean(),

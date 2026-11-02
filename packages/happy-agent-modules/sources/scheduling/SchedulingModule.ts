@@ -14,6 +14,7 @@ import { type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { afterCommit, detach, shutdown, type Context } from "@steve.kite/stdlib";
 
+import type { ConfigModule } from "../config/index.js";
 import type { BotSettingsModule } from "../botSettings/index.js";
 import type { HistoryModule } from "../history/index.js";
 import { senderAgentIdMetadata } from "../impl/messageOrigin.js";
@@ -119,6 +120,7 @@ export class SchedulingModule implements AgentModule {
 
     readonly #botSettings: BotSettingsModule | undefined;
     readonly #history: HistoryModule | undefined;
+    readonly #config: ConfigModule | undefined;
     #agents: AgentSystemRef | undefined;
     #ownCtx: Context | undefined;
 
@@ -128,10 +130,17 @@ export class SchedulingModule implements AgentModule {
      * due, so a bot restricted in between does not deliver what it promised before.
      * @param history The mutation the scheduling run answers, kept with the schedule and carried
      * on the message when it is due. Without it, scheduled messages carry none.
+     * @param config Whether the installation is attended-only; then nothing is scheduled, armed,
+     * or delivered, because a delivery starts a turn no person asked for.
      */
-    constructor(botSettings?: BotSettingsModule, history?: HistoryModule) {
+    constructor(botSettings?: BotSettingsModule, history?: HistoryModule, config?: ConfigModule) {
         this.#botSettings = botSettings;
         this.#history = history;
+        this.#config = config;
+    }
+
+    get #attendedOnly(): boolean {
+        return this.#config?.attendedOnly === true;
     }
 
     /**
@@ -167,7 +176,10 @@ export class SchedulingModule implements AgentModule {
             ];
             // A subagent answers whoever created it and then stops; a message it scheduled would
             // arrive for an agent that is no longer anyone's correspondent.
-            if ((await this.#requireAgents().parentOf(ctx, scope.agent.id)) === null) {
+            if (
+                !this.#attendedOnly &&
+                (await this.#requireAgents().parentOf(ctx, scope.agent.id)) === null
+            ) {
                 tools.push(
                     scheduleMessageTool(this, scope.agent.id),
                     listScheduledMessagesTool(this, scope.agent.id),
@@ -650,7 +662,7 @@ export class SchedulingModule implements AgentModule {
     /** Hold one alarm per pending message, replacing any alarm already held for it. */
     #arm(schedule: SchedulingScheduledMessage): void {
         this.#disarm(schedule.id);
-        if (schedule.status !== "pending") return;
+        if (schedule.status !== "pending" || this.#attendedOnly) return;
         this.#alarms.set(
             schedule.id,
             new SchedulingAlarm(schedule.dueAt, () => {

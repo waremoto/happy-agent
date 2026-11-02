@@ -53,3 +53,10 @@ tree are unaffected.
 A scheduled message is delivered after the scheduling run has settled, so it once started a run
 that echoed nothing. The schedule now records the `mutationId` its scheduling run answered, from
 History's `runMutationId`, and the delivered message carries it, so the run it starts echoes it.
+
+## Attended-only installations schedule nothing
+
+A delivered scheduled message starts a turn no person asked for. When the installation is
+attended-only, `schedule_message` and its list and cancel tools are not offered, and no alarm is
+armed, including for messages a previous process left pending. The rows stay pending rather than
+being cancelled, so turning attended-only off later delivers what was promised.

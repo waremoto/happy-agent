@@ -1352,6 +1352,8 @@ export class OnboardingModule implements AgentModule {
      * onboarding chose. It starts Happy's turn when Happy is idle.
      */
     async #tell(ctx: Context, event: OnboardingEvent): Promise<void> {
+        // A hidden instruction starts a turn of Happy's that no person asked for.
+        if (this.#config.attendedOnly) return;
         const happy = await this.#bots.chiefOfStaff(ctx);
         const agents = this.#agents;
         const chosen = (await this.#state(ctx)).model;

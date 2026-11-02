@@ -673,6 +673,9 @@ export class SubtasksModule implements AgentModule {
             },
             tools: async (toolCtx, scope) => {
                 const creator = { provider: scope.agent.provider, model: scope.agent.model };
+                if (this.#collaboration.delegationAllowed === false) {
+                    return [archiveSubtaskTool(this, scope.agent.id)];
+                }
                 return [
                     createSubtaskTool(
                         this,

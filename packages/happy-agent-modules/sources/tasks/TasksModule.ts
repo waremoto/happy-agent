@@ -970,6 +970,11 @@ export class TasksModule implements AgentModule {
         explicitMode?: MessageMode,
         explanation?: string,
     ): Promise<void> {
+        if (this.#config.attendedOnly) {
+            throw new TaskConflictError(
+                "This installation is attended-only: agents cannot message task agents; ask the person.",
+            );
+        }
         const agents = this.#requireAgents();
         const mutationId = await this.#history?.runMutationId(ctx, fromAgentId);
         await ctx.inTx(async (txCtx) => {

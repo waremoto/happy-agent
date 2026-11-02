@@ -127,6 +127,14 @@ export class CollaborationModule implements AgentModule {
         this.#crossWorkspace = config.configuration.values.features.crossWorkspace;
     }
 
+    /**
+     * Whether agents may create other agents or message them. False when the installation is
+     * attended-only; subtasks ask this too, since they are agents created by an agent.
+     */
+    get delegationAllowed(): boolean {
+        return this.#config.attendedOnly !== true;
+    }
+
     /** The same curated choices serve ordinary collaborators and interactive subtasks. */
     availableModels(): readonly AgentModel[] {
         return this.#availableModels();
@@ -692,6 +700,14 @@ export class CollaborationModule implements AgentModule {
             // What the description lists is what the agent knows until a notice or agent_options.
             if ((await scope.kv.read(ctx, AGENT_OPTIONS_KNOWN_KEY)) === undefined) {
                 await scope.kv.write(ctx, AGENT_OPTIONS_KNOWN_KEY, shown);
+            }
+            // Attended-only: another agent's turn would start without a person asking for it, so
+            // the agent can stop and archive agents but not create or message them.
+            if (!this.delegationAllowed) {
+                return [
+                    interruptAgentTool(this, scope.agent.id),
+                    archiveAgentTool(this, scope.agent.id),
+                ];
             }
             return [
                 createAgentTool(

@@ -15,8 +15,8 @@ function ownerContext(context: Context, agentId: string): Context {
 }
 
 describe("Goal stopping the work behind a goal", () => {
-    it("takes only the optional History module", () => {
-        expect(GoalModule.length).toBe(1);
+    it("takes only the optional History and config modules", () => {
+        expect(GoalModule.length).toBe(2);
         const module = new GoalModule();
         expect(module.name).toBe("goal");
     });

@@ -8,3 +8,8 @@ mutation, read from History before the run settles. Each continuation passes it 
 of a goal started under a mutation keep echoing it as consequences of that request until other
 accepted work starts a run that supersedes it, or the goal ends. A continuation after an external
 activation follows no run and carries none.
+
+## Attended-only goals never continue themselves
+
+On an attended-only installation a goal records progress but never sends its continuation or the
+wake that an outside activation would send. The person continues it with their own message.

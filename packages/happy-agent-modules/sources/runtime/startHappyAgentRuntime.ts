@@ -638,7 +638,7 @@ export async function startHappyAgentRuntime(
             compute.computeModule,
             botSettings,
         );
-        const scheduling = new SchedulingModule(botSettings, history);
+        const scheduling = new SchedulingModule(botSettings, history, config);
         const cleanup = new CleanupModule(
             config,
             runners,
@@ -699,7 +699,7 @@ export async function startHappyAgentRuntime(
             tasks,
             surfaces,
         );
-        const goal = new GoalModule(history);
+        const goal = new GoalModule(history, config);
         const exportedBots = new ExportedBotsModule(
             config,
             bots,
