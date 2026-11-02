@@ -174,6 +174,10 @@ describe.skipIf(process.env.HAPPY_NATIVE_APPROVAL_LIVE !== "1")(
                             provider: harness.provider,
                             inputDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
                         });
+                        // The person sees what the action touches, not only a tool name.
+                        expect(request?.source === "native_tool" && request.action).toContain(
+                            "approved.txt",
+                        );
                     }
                     expect(w.ran()).toBe(answer === "Allow once");
                 }, 240_000);

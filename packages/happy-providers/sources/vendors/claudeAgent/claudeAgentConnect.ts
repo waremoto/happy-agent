@@ -20,7 +20,7 @@ import { processTreeGroups, terminateProcessTree } from "@/protocol/acp/impl/pro
 import { CLAUDE_SDK_PRIVACY_ENVIRONMENT } from "@/vendors/claude/claudeSdkPrivacyEnvironment.js";
 import { resolveClaudeCodeExecutablePath } from "@/vendors/claude/resolveClaudeCodeExecutablePath.js";
 import { AsyncInputQueue } from "@/vendors/claudeAgent/impl/AsyncInputQueue.js";
-import { claudeAgentUpdates } from "@/vendors/claudeAgent/impl/claudeAgentUpdates.js";
+import { claudeAgentUpdates, toolTitle } from "@/vendors/claudeAgent/impl/claudeAgentUpdates.js";
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 const MODES: readonly PermissionMode[] = [
@@ -206,9 +206,14 @@ class ClaudeAgentConnection implements AcpAgentConnection {
                     ...CLAUDE_SDK_PRIVACY_ENVIRONMENT,
                 },
                 canUseTool: async (toolName, toolInput, { toolUseID }) => {
+                    // The title a person approves names what the tool touches, as its row does.
                     const answer = await this.#client.requestPermission({
                         sessionId,
-                        toolCall: { toolCallId: toolUseID, title: toolName, rawInput: toolInput },
+                        toolCall: {
+                            toolCallId: toolUseID,
+                            title: toolTitle(toolName, toolInput),
+                            rawInput: toolInput,
+                        },
                         options: [
                             { optionId: "allow", name: "Allow", kind: "allow_once" },
                             { optionId: "reject", name: "Reject", kind: "reject_once" },

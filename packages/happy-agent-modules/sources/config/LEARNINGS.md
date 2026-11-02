@@ -568,5 +568,6 @@ changed while running cannot turn it back on, because the getter enforces the sw
 `model_not_found`. Nothing ran, but a test of the native agent must assert it got an `AcpProvider`,
 or it silently tests the wrong thing. `nativeToolApproval.live.test.ts` also removes the
 `CLAUDE_CODE_*` host variables it inherits when started from inside a Claude Code session, so the
-child Claude does not join that session's host. Live, Claude names a write only by its tool
-(`Write`) while Codex shows the full command; the digest covers the exact input either way.
+child Claude does not join that session's host. Live, Claude first named a write only by its tool
+(`Write`); its permission requests now use the same title as its tool rows (`Write: <path>`,
+`Bash: <command>`), and the live test requires the file name in the question.

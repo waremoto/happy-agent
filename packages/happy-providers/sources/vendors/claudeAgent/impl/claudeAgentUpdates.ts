@@ -85,7 +85,7 @@ export function claudeAgentUpdates(): {
 }
 
 /** A Happy tool reaches Claude as `mcp__happy__<name>`; the title keeps that so it is recognized. */
-function toolTitle(name: string, input: unknown): string {
+export function toolTitle(name: string, input: unknown): string {
     if (name.startsWith("mcp__")) return name;
     const record = (input ?? {}) as Record<string, unknown>;
     const detail =
