@@ -560,3 +560,13 @@ separate switches left gaps: scheduled messages, goals, onboarding, subagents an
 peer messaging by rewriting the effective values, so every existing reader and `GET /v0/config`
 already agree. Paths with no switch of their own ask `attendedOnly`. Peer messaging settings
 changed while running cannot turn it back on, because the getter enforces the switch too.
+
+## A Claude Code model on an account without the harness reaches Happy's own loop
+
+`claude-code/haiku` on the `claude` provider resolves to Happy's Anthropic loop unless
+`[harnesses.claude_code]` is configured, and that loop sends the whole id to the API, which answers
+`model_not_found`. Nothing ran, but a test of the native agent must assert it got an `AcpProvider`,
+or it silently tests the wrong thing. `nativeToolApproval.live.test.ts` also removes the
+`CLAUDE_CODE_*` host variables it inherits when started from inside a Claude Code session, so the
+child Claude does not join that session's host. Live, Claude names a write only by its tool
+(`Write`) while Codex shows the full command; the digest covers the exact input either way.
