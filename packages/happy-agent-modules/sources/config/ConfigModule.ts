@@ -8,8 +8,9 @@ import {
     type ComputeServiceExecution,
 } from "@slopus/happy-agent-compute";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { chmod, mkdir, open, rename, rm, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type {
@@ -3654,6 +3655,28 @@ export class ConfigModule implements AgentModule {
         if (key?.type !== "secret") return undefined;
         const value = this.#environmentValue(key.env);
         return value === undefined ? undefined : new TextEncoder().encode(value);
+    }
+
+    /**
+     * The Orkest agency this installation opens attended sessions for, from the environment only:
+     * `ORKEST_AGENCY_URL` (the Father base URL), `ORKEST_AGENCY_TOKEN_FILE` (a file holding the
+     * service token, read here and never logged or exposed) and optional `ORKEST_WORKER_ID`.
+     * `undefined` unless the URL and a readable, non-empty token are both present.
+     */
+    get orkestAgency(): { url: string; token: string; workerId: string } | undefined {
+        const url = this.#environmentValue("ORKEST_AGENCY_URL")?.trim();
+        const tokenFile = this.#environmentValue("ORKEST_AGENCY_TOKEN_FILE")?.trim();
+        if (!url || !tokenFile || url.length > MAX_CONFIG_STRING_LENGTH) return undefined;
+        let token: string;
+        try {
+            token = readFileSync(tokenFile, "utf8").trim();
+        } catch {
+            return undefined;
+        }
+        if (token.length === 0) return undefined;
+        const workerId =
+            this.#environmentValue("ORKEST_WORKER_ID")?.trim() || `happy:${hostname()}`;
+        return { url: url.replace(/\/+$/, ""), token, workerId };
     }
 
     /**

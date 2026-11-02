@@ -1,0 +1,161 @@
+import { Type, type Static } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
+
+export interface OrkestAgencyEndpoint {
+    readonly url: string;
+    readonly token: string;
+    readonly workerId: string;
+}
+
+const nullableString = Type.Union([Type.String(), Type.Null()]);
+
+/** One attended run as Father's `/internal/agency/attended/*` feeds describe it (camelCase). */
+export const attendedSessionSchema = Type.Object({
+    runId: Type.String({ minLength: 1, maxLength: 64 }),
+    state: Type.String(),
+    harness: Type.String(),
+    permissionMode: Type.Union([Type.Literal("read_only"), Type.Literal("workspace_write")]),
+    title: Type.String({ minLength: 1, maxLength: 200 }),
+    brief: Type.String({ maxLength: 20_000 }),
+    workLabel: Type.String(),
+    endRequestedAt: nullableString,
+    intentId: nullableString,
+    ownerJobRef: nullableString,
+    fence: Type.Number(),
+});
+export type AttendedSession = Static<typeof attendedSessionSchema>;
+
+const leaseSchema = Type.Object({ status: Type.String(), fenceToken: Type.Number() });
+
+/** An owner call's answer: `final` means the run is no longer this owner's (revoked, stale, gone). */
+export interface AgencyAnswer {
+    readonly ok: boolean;
+    readonly final: boolean;
+}
+
+/**
+ * The owner side of Father's agency API, authenticated with the Father service token. Every
+ * response is validated; anything unexpected is an error, so the loop retries rather than acting.
+ */
+export class OrkestAgencyClient {
+    readonly #endpoint: OrkestAgencyEndpoint;
+
+    constructor(endpoint: OrkestAgencyEndpoint) {
+        this.#endpoint = endpoint;
+    }
+
+    async pending(): Promise<AttendedSession[]> {
+        return this.#sessions(await this.#call("GET", "/internal/agency/attended/pending"));
+    }
+
+    async active(workerId: string): Promise<AttendedSession[]> {
+        return this.#sessions(
+            await this.#call(
+                "GET",
+                `/internal/agency/attended/active?worker=${encodeURIComponent(workerId)}`,
+            ),
+        );
+    }
+
+    async acknowledge(intentId: string, ownerJobRef: string): Promise<AgencyAnswer> {
+        return answer(
+            await this.#call("POST", `/internal/agency/intents/${intentId}/ack`, { ownerJobRef }),
+        );
+    }
+
+    /** The new fence, or `undefined` when the run cannot be claimed (revoked, ended, not a member). */
+    async claim(
+        runId: string,
+        workerId: string,
+        leaseSeconds: number,
+    ): Promise<{ fence: number } | undefined> {
+        const response = await this.#call("POST", `/internal/agency/runs/${runId}/claim`, {
+            workerId,
+            leaseSeconds,
+        });
+        if (response.status === 409) return undefined;
+        if (response.status !== 200 || !Value.Check(leaseSchema, response.body)) {
+            throw new Error(`Orkest claim answered ${response.status}.`);
+        }
+        return { fence: response.body.fenceToken };
+    }
+
+    async heartbeat(runId: string, fence: number, leaseSeconds: number): Promise<AgencyAnswer> {
+        return answer(
+            await this.#call("POST", `/internal/agency/runs/${runId}/heartbeat`, {
+                fence,
+                leaseSeconds,
+            }),
+        );
+    }
+
+    async publish(
+        runId: string,
+        fence: number,
+        eventType: string,
+        payload: Record<string, unknown>,
+    ): Promise<AgencyAnswer> {
+        return answer(
+            await this.#call("POST", `/internal/agency/runs/${runId}/publish`, {
+                fence,
+                eventType,
+                agentId: this.#endpoint.workerId,
+                toolId: null,
+                payload,
+            }),
+        );
+    }
+
+    /** Proposed, with one session consumed: the person ended it and the budget counts sessions. */
+    async complete(runId: string, fence: number, reason: string): Promise<AgencyAnswer> {
+        return answer(
+            await this.#call("POST", `/internal/agency/runs/${runId}/complete`, {
+                fence,
+                proposed: true,
+                consumed: 1,
+                reason,
+            }),
+        );
+    }
+
+    #sessions(response: { status: number; body: unknown }): AttendedSession[] {
+        if (response.status !== 200 || !Array.isArray(response.body)) {
+            throw new Error(`Orkest answered ${response.status}.`);
+        }
+        return response.body.filter((item): item is AttendedSession =>
+            Value.Check(attendedSessionSchema, item),
+        );
+    }
+
+    async #call(
+        method: "GET" | "POST",
+        path: string,
+        body?: unknown,
+    ): Promise<{ status: number; body: unknown }> {
+        const response = await fetch(`${this.#endpoint.url}${path}`, {
+            method,
+            headers: {
+                "X-Ghost-Service-Token": this.#endpoint.token,
+                ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+            },
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+            signal: AbortSignal.timeout(10_000),
+        });
+        if (response.status >= 500) throw new Error(`Orkest answered ${response.status}.`);
+        const text = await response.text();
+        let parsed: unknown = null;
+        try {
+            parsed = text.length === 0 ? null : JSON.parse(text);
+        } catch {
+            parsed = null;
+        }
+        return { status: response.status, body: parsed };
+    }
+}
+
+function answer(response: { status: number; body: unknown }): AgencyAnswer {
+    if (response.status === 200) return { ok: true, final: false };
+    // 404 gone, 409 revoked/stale/conflict: the run is no longer this owner's.
+    if (response.status === 404 || response.status === 409) return { ok: false, final: true };
+    throw new Error(`Orkest answered ${response.status}.`);
+}

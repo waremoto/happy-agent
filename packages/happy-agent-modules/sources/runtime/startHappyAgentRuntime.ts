@@ -1,6 +1,7 @@
 import { ensurePrivateDirectory } from "@slopus/happy-agent-compute";
 import { chmod, mkdir } from "node:fs/promises";
 import { ConnectionsModule } from "../connections/index.js";
+import { OrkestModule } from "../orkest/index.js";
 import { PeerMessagingModule } from "../peerMessaging/index.js";
 import { RunnersModule } from "../runners/index.js";
 
@@ -178,6 +179,7 @@ export interface HappyAgentRuntimeModules {
     readonly compute: ComputeModule;
     readonly config: ConfigModule;
     readonly connections: ConnectionsModule;
+    readonly orkest: OrkestModule;
     readonly peerMessaging: PeerMessagingModule;
     readonly runners: RunnersModule;
     readonly contextWindow: ContextWindowModule;
@@ -710,6 +712,8 @@ export async function startHappyAgentRuntime(
             team,
         );
         registerShutdown("exportedBots", async () => await exportedBots.close());
+        const orkest = new OrkestModule(config, tasks);
+        registerShutdown("orkest", async () => await orkest.close());
         const gemini = new GeminiModule(config, compute.computeModule, chatMedia);
         const imageGeneration = new ImageGenerationModule(config, chatMedia);
         menuBar = new MenuBarModule(config);
@@ -847,6 +851,7 @@ export async function startHappyAgentRuntime(
             config,
             contextWindow,
             connections,
+            orkest,
             peerMessaging,
             runners,
             durableFunctions,
@@ -940,6 +945,7 @@ export async function startHappyAgentRuntime(
             live,
             bots,
             tasks,
+            orkest,
             spaces,
             onboarding,
             artifacts,
