@@ -15,6 +15,9 @@ import { codexItemUpdates } from "@/vendors/codexAppServer/impl/codexItemUpdates
 const REQUEST_TIMEOUT_MS = 120_000;
 const SANDBOXES = ["read-only", "workspace-write", "danger-full-access"] as const;
 type Sandbox = (typeof SANDBOXES)[number];
+/** `never` keeps Codex inside its sandbox; `on-request` lets it ask before stepping outside. */
+const APPROVAL_POLICIES = ["never", "on-request"] as const;
+type ApprovalPolicy = (typeof APPROVAL_POLICIES)[number];
 
 interface CodexModel {
     readonly model: string;
@@ -29,6 +32,7 @@ interface CodexThread {
     model: string | undefined;
     effort: string | undefined;
     sandbox: Sandbox;
+    approvalPolicy: ApprovalPolicy;
     /** The running turn and the prompt waiting for it to end. */
     turn:
         | {
@@ -157,6 +161,12 @@ class CodexAppServer implements AcpAgentConnection {
         if (params.configId === "mode" && (SANDBOXES as readonly string[]).includes(value)) {
             thread.sandbox = value as Sandbox;
         }
+        if (
+            params.configId === "approval_policy" &&
+            (APPROVAL_POLICIES as readonly string[]).includes(value)
+        ) {
+            thread.approvalPolicy = value as ApprovalPolicy;
+        }
         return { configOptions: await this.#configOptions(thread) };
     }
 
@@ -172,7 +182,7 @@ class CodexAppServer implements AcpAgentConnection {
                 input: userInput(params.prompt),
                 ...(thread.model === undefined ? {} : { model: thread.model }),
                 ...(thread.effort === undefined ? {} : { effort: thread.effort }),
-                approvalPolicy: "never",
+                approvalPolicy: thread.approvalPolicy,
                 sandboxPolicy: sandboxPolicy(thread.sandbox, thread.cwd),
             })) as { turn: { id: string } };
             const waiting = thread.turn as CodexThread["turn"];
@@ -234,6 +244,7 @@ class CodexAppServer implements AcpAgentConnection {
             model: started.model,
             effort: started.reasoningEffort ?? undefined,
             sandbox: "workspace-write",
+            approvalPolicy: "never",
             turn: undefined,
         };
         this.#threads.set(id, thread);
@@ -287,6 +298,13 @@ class CodexAppServer implements AcpAgentConnection {
                 type: "select",
                 currentValue: thread.sandbox,
                 options: SANDBOXES.map((sandbox) => ({ value: sandbox, name: sandbox })),
+            },
+            {
+                id: "approval_policy",
+                name: "Approval policy",
+                type: "select",
+                currentValue: thread.approvalPolicy,
+                options: APPROVAL_POLICIES.map((policy) => ({ value: policy, name: policy })),
             },
         ] as acp.SessionConfigOption[];
     }
@@ -402,16 +420,21 @@ class CodexAppServer implements AcpAgentConnection {
         }
         const request = params as {
             threadId: string;
+            turnId?: string;
             itemId: string;
             command?: string;
+            cwd?: string;
             reason?: string;
         };
+        // Everything Codex sent except its routing IDs is what the person approves.
+        const { threadId: _thread, turnId: _turn, itemId: _item, ...action } = request;
         const answer = await Promise.resolve(
             this.#client.requestPermission({
                 sessionId: request.threadId,
                 toolCall: {
                     toolCallId: request.itemId,
                     title: request.command ?? request.reason ?? method,
+                    rawInput: { method, ...action },
                 },
                 options: [
                     { optionId: "accept", name: "Allow", kind: "allow_once" },

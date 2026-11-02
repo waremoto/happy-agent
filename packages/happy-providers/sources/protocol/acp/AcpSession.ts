@@ -12,12 +12,14 @@ import type { SessionRunRequest } from "@/core/SessionRunRequest.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import type { SessionUsage } from "@/core/SessionUsage.js";
 import type {
+    AcpAskPerson,
     AcpConfigOptionValue,
     AcpPermissionMode,
     AcpProviderOptions,
     AcpTurnEnvironment,
 } from "@/protocol/acp/AcpProvider.js";
 import { acpCompactWithAgent } from "@/protocol/acp/impl/acpCompactWithAgent.js";
+import { acpPermissionQuestion } from "@/protocol/acp/impl/acpPermissionQuestion.js";
 import type { AcpConnection } from "@/protocol/acp/AcpConnection.js";
 import { acpConnectionSpawn } from "@/protocol/acp/impl/acpConnectionSpawn.js";
 import {
@@ -136,6 +138,9 @@ export class AcpSession extends BaseSession {
     /** Lets the next new session start once this one's agent has bound its conversation. */
     #releaseNewSession: (() => void) | undefined;
     #permissionMode: AcpPermissionMode | undefined;
+    /** Who decides an action the mode does not allow, for the turn that is running. */
+    #askPerson: AcpAskPerson | undefined;
+    #turnSignal: AbortSignal | undefined;
     #bridge: AcpToolBridgeServer | undefined;
     readonly #applied = new Map<string, string | boolean>();
     /** The configuration options the foreign session last advertised. */
@@ -209,6 +214,8 @@ export class AcpSession extends BaseSession {
         }
         const environment = this.#options.environment(ctx);
         this.#permissionMode = environment.permissionMode;
+        this.#askPerson = environment.askPerson;
+        this.#turnSignal = signal;
         yield { type: "block_start" };
 
         let connection: AcpConnection | undefined;
@@ -593,7 +600,10 @@ export class AcpSession extends BaseSession {
             ...(profile?.modelOptions?.(request.model, request.effort) ?? []),
             ...(environment.permissionMode === undefined
                 ? []
-                : (profile?.permissionOptions?.(environment.permissionMode) ?? [])),
+                : (profile?.permissionOptions?.(
+                      environment.permissionMode,
+                      environment.askPerson !== undefined,
+                  ) ?? [])),
         ];
         for (const option of wanted) {
             const configId = acpConfigOptionId(this.#advertised, option);
@@ -803,10 +813,10 @@ export class AcpSession extends BaseSession {
         await acpSessionRecordWrite(this.#options.stateDirectory, this.id, record);
     }
 
-    #answerPermission(params: acp.RequestPermissionRequest): acp.RequestPermissionResponse {
-        // The agent asks before acting on its own. Read only refuses; every other mode lets
-        // this one action through.
-        const allow = this.#permissionMode !== "read_only";
+    async #answerPermission(
+        params: acp.RequestPermissionRequest,
+    ): Promise<acp.RequestPermissionResponse> {
+        const allow = await this.#permits(params);
         const option =
             params.options.find(
                 (candidate) => candidate.kind === (allow ? "allow_once" : "reject_once"),
@@ -816,6 +826,22 @@ export class AcpSession extends BaseSession {
             );
         if (option === undefined) return { outcome: { outcome: "cancelled" } };
         return { outcome: { outcome: "selected", optionId: option.optionId } };
+    }
+
+    /**
+     * The agent asks before acting on its own. In Read only and Workspace write, when a person can
+     * be asked, the action is theirs to allow once; anything but an explicit allow refuses it.
+     * Otherwise the mode decides: Read only refuses, and Auto and Full access let it through.
+     */
+    async #permits(params: acp.RequestPermissionRequest): Promise<boolean> {
+        const mode = this.#permissionMode;
+        const askPerson = this.#askPerson;
+        if (askPerson !== undefined && (mode === "read_only" || mode === "workspace_write")) {
+            const signal = this.#turnSignal ?? new AbortController().signal;
+            if (signal.aborted) return false;
+            return await askPerson(acpPermissionQuestion(params), signal).catch(() => false);
+        }
+        return mode !== "read_only";
     }
 
     #usage(response: acp.PromptResponse | undefined, outputCharacters: number): SessionUsage {

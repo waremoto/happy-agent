@@ -6,8 +6,10 @@
 // "wait" holds the prompt open until cancelled or steered; "throttled" is refused as too many
 // requests the first time it is sent, and "throttled late" only after reporting a tool call;
 // "over quota" fails with a 429 that names a weekly limit; "stubborn" never ends its first prompt;
+// "ask to write" asks permission to write approval-test.txt and writes it only when allowed;
 // anything else is echoed back.
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 
 import * as acp from "@agentclientprotocol/sdk";
@@ -28,6 +30,7 @@ const known = () =>
 class ScriptedAgent {
     #conn;
     #servers = new Map();
+    #cwds = new Map();
     #cancelled = new Map();
     #throttled = false;
 
@@ -45,6 +48,7 @@ class ScriptedAgent {
     async newSession(params) {
         const sessionId = `s${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
         this.#servers.set(sessionId, params.mcpServers);
+        this.#cwds.set(sessionId, params.cwd);
         writeFileSync(sessionsFile, JSON.stringify({ ...known(), [sessionId]: true }));
         log({ method: "newSession", sessionId, mcpServers: params.mcpServers.length });
         return {
@@ -73,6 +77,7 @@ class ScriptedAgent {
         if (known()[params.sessionId] !== true)
             throw acp.RequestError.resourceNotFound(params.sessionId);
         this.#servers.set(params.sessionId, params.mcpServers);
+        this.#cwds.set(params.sessionId, params.cwd);
         log({ method: "loadSession", sessionId: params.sessionId });
         // A real agent replays history here; the client must ignore it.
         await this.#say(params.sessionId, "REPLAYED-HISTORY");
@@ -143,6 +148,32 @@ class ScriptedAgent {
             );
             if (typeof steered !== "string") return { stopReason: "cancelled" };
             await this.#say(params.sessionId, `steered:${steered}`);
+            return { stopReason: "end_turn" };
+        }
+        if (text.includes("ask to write")) {
+            const input = { file_path: "approval-test.txt", content: "APPROVED" };
+            const answer = await this.#conn.requestPermission({
+                sessionId: params.sessionId,
+                toolCall: {
+                    toolCallId: `write-${Date.now()}`,
+                    title: "Write approval-test.txt",
+                    rawInput: input,
+                },
+                options: [
+                    { optionId: "allow", name: "Allow", kind: "allow_once" },
+                    { optionId: "reject", name: "Reject", kind: "reject_once" },
+                ],
+            });
+            const allowed =
+                answer.outcome.outcome === "selected" && answer.outcome.optionId === "allow";
+            log({ method: "permission", allowed });
+            if (allowed) {
+                writeFileSync(
+                    join(this.#cwds.get(params.sessionId), input.file_path),
+                    input.content,
+                );
+            }
+            await this.#say(params.sessionId, allowed ? "wrote" : "refused");
             return { stopReason: "end_turn" };
         }
         if (text.includes("use happy")) {

@@ -17,10 +17,34 @@ export interface AcpAgentLaunch {
 /** The access the hosting agent currently grants, in Happy's four permission modes. */
 export type AcpPermissionMode = "read_only" | "workspace_write" | "auto" | "full_access";
 
+/** One action a foreign agent asks to take, put to the person exactly as it will run. */
+export interface AcpPermissionQuestion {
+    /** What the agent wants to do, as it described the action. */
+    readonly action: string;
+    /** The exact tool input it will run with if allowed; `undefined` when it sent none. */
+    readonly input: unknown;
+    /** `sha256:` + hex of `input` serialized as JSON with sorted keys. */
+    readonly inputDigest: string;
+}
+
+/**
+ * Asks the person about one action. Resolves `true` only when they allowed it once; a denial, a
+ * withdrawn or unanswered question, or `signal` aborting all resolve `false`.
+ */
+export type AcpAskPerson = (
+    question: AcpPermissionQuestion,
+    signal: AbortSignal,
+) => Promise<boolean>;
+
 /** Where and under what permission one turn of the foreign agent runs. */
 export interface AcpTurnEnvironment {
     readonly cwd: string;
     readonly permissionMode?: AcpPermissionMode;
+    /**
+     * Present when a person can be asked. In `read_only` and `workspace_write` an action the mode
+     * does not allow is then put to them instead of being decided by the mode.
+     */
+    readonly askPerson?: AcpAskPerson;
 }
 
 /** One ACP session configuration option to set before a prompt. */
@@ -51,7 +75,11 @@ export interface AcpAgentProfile {
         effort: SessionReasoningEffort | undefined,
     ) => readonly AcpConfigOptionValue[];
     /** The agent's config-option values that best match a Happy permission mode. */
-    readonly permissionOptions?: (mode: AcpPermissionMode) => readonly AcpConfigOptionValue[];
+    /** `asksPerson`: actions outside `mode` go to a person rather than being decided by it. */
+    readonly permissionOptions?: (
+        mode: AcpPermissionMode,
+        asksPerson: boolean,
+    ) => readonly AcpConfigOptionValue[];
     /**
      * For agents that ignore ACP `mcpServers`: files that make the bridge discoverable when the
      * directory holding them is passed as an additional workspace directory.

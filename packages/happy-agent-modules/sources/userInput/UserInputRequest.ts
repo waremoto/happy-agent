@@ -27,6 +27,7 @@ export const MAX_USER_INPUT_PRESENCE_TITLE_CHARACTERS = 128;
 export const MAX_USER_INPUT_PRESENCE_EMOJI_CHARACTERS = 32;
 export const MAX_USER_INPUT_PRESENCE_PROMPT_CHARACTERS = 2_000;
 export const MAX_USER_INPUT_PERMISSION_SERVER_CHARACTERS = 128;
+export const MAX_USER_INPUT_PERMISSION_ACTION_CHARACTERS = 2_000;
 
 export const userInputTimestampSchema = Type.Integer({
     minimum: 0,
@@ -205,24 +206,42 @@ const userInputBatchAnswersSchema = Type.Record(userInputQuestionIdSchema, userI
 });
 
 /**
- * Marks a question that something outside the agent is asking: today, an MCP server's elicitation
- * during one of the agent's tool calls. Only the module's own `askForPermission` sets it, so no
- * agent tool can present its own question as one.
+ * Marks a question that something outside the agent is asking: an MCP server's elicitation during
+ * one of the agent's tool calls, or a native coding agent asking to take one action. Only the
+ * module's own `askForPermission` sets it, so no agent tool can present its own question as one.
  */
-export const userInputPermissionRequestSchema = Type.Object(
-    {
-        source: Type.Literal("mcp_elicitation"),
-        server: Type.String({
-            minLength: 1,
-            maxLength: MAX_USER_INPUT_PERMISSION_SERVER_CHARACTERS,
-        }),
-        serverTitle: Type.String({
-            minLength: 1,
-            maxLength: MAX_USER_INPUT_PERMISSION_SERVER_CHARACTERS,
-        }),
-    },
-    { additionalProperties: false },
-);
+export const userInputPermissionRequestSchema = Type.Union([
+    Type.Object(
+        {
+            source: Type.Literal("mcp_elicitation"),
+            server: Type.String({
+                minLength: 1,
+                maxLength: MAX_USER_INPUT_PERMISSION_SERVER_CHARACTERS,
+            }),
+            serverTitle: Type.String({
+                minLength: 1,
+                maxLength: MAX_USER_INPUT_PERMISSION_SERVER_CHARACTERS,
+            }),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            source: Type.Literal("native_tool"),
+            provider: Type.Union([Type.Literal("claude"), Type.Literal("codex")]),
+            providerTitle: Type.String({
+                minLength: 1,
+                maxLength: MAX_USER_INPUT_PERMISSION_SERVER_CHARACTERS,
+            }),
+            action: Type.String({
+                minLength: 1,
+                maxLength: MAX_USER_INPUT_PERMISSION_ACTION_CHARACTERS,
+            }),
+            inputDigest: Type.String({ pattern: "^sha256:[0-9a-f]{64}$" }),
+        },
+        { additionalProperties: false },
+    ),
+]);
 
 export const userInputRequestCommonProperties = {
     id: userInputRequestIdSchema,

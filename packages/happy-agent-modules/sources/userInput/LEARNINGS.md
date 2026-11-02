@@ -73,3 +73,15 @@ both get `200`, the second carrying the first one's answer as if it had won. The
 the answer now share one transaction, and `answer` throws `UserInputConflictError` for a settled
 request, which the API reports as `409` with the question as it stands. Cancellation and completion
 stay idempotent: repeating them asks for nothing new.
+
+## Native agents ask the person, never themselves
+
+Claude Code and Codex used to have every native permission request answered by the permission
+mode: Read only refused, every other mode allowed, and Codex ran with `approvalPolicy: "never"`.
+No person ever saw what a native agent wanted to do. Now, in Read only and Workspace write, an
+action the mode does not allow becomes a question carrying `permissionRequest.source:
+"native_tool"`, the exact action text and a SHA-256 digest of the exact input. Only an explicit
+`Allow once` lets it run, and only that once. A denial, free text, a withdrawn question, a stopped
+turn, or a restart that takes the native process all refuse it. Auto keeps its own automatic review
+and Full access allows; neither asks. A pending question is never permission: the native agent
+holds the action until the answer arrives.

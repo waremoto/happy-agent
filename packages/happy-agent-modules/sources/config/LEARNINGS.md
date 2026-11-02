@@ -543,3 +543,11 @@ CLI; custom accounts without a name use a readable ID. Names are trimmed and val
 displayed verbatim. Configuration owns the defaults. Names never change credentials, provider
 types, enabled or hidden flags, pool membership, defaults, or routing. Email shortening belongs
 only to recipe guidance when choosing a name, never to a runtime formatter.
+
+## Native agents reach the person through user input, joined after construction
+
+Foreign agent providers are built here, but asking the person belongs to the user input module,
+which depends on presence, which depends on this module. User input therefore joins through
+`useUserInput` once the runtime has built it, and turns read it lazily. Until it joins, and for any
+turn without an agent, native agents keep their mode's own answer, so nothing new is allowed by the
+seam's absence.

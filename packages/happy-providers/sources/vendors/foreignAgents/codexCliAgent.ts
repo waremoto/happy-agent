@@ -52,8 +52,9 @@ export const codexCliAgent: ForeignAgent = {
                     : [{ configId: "reasoning_effort", value: effort }]),
             ];
         },
-        // Codex's sandbox; Codex never stops to ask, so the sandbox is the whole policy.
-        permissionOptions: (mode) => [
+        // Codex's sandbox. Without a person to ask, Codex never stops, so the sandbox is the whole
+        // policy; with one, Codex asks before stepping outside Read only or Workspace write.
+        permissionOptions: (mode, asksPerson) => [
             {
                 configId: "mode",
                 value:
@@ -62,6 +63,13 @@ export const codexCliAgent: ForeignAgent = {
                         : mode === "full_access"
                           ? "danger-full-access"
                           : "workspace-write",
+            },
+            {
+                configId: "approval_policy",
+                value:
+                    asksPerson && (mode === "read_only" || mode === "workspace_write")
+                        ? "on-request"
+                        : "never",
             },
         ],
     },

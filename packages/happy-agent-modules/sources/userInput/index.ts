@@ -130,6 +130,11 @@ export {
     type UserInputAuthorizationAction,
 } from "./UserInputStore.js";
 export { UserInputConflictError } from "./UserInputConflictError.js";
+export {
+    NATIVE_TOOL_ALLOW,
+    NATIVE_TOOL_DENY,
+    type NativeToolPermission,
+} from "./impl/nativeToolPermissionQuestion.js";
 export { requestUserInputTool } from "./tools/request_user_input.js";
 export { readUserInputTool } from "./tools/read_user_input.js";
 export { cancelAskTool } from "./tools/cancel_ask.js";

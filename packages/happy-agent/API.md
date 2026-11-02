@@ -460,7 +460,9 @@ the prompts.
 
 Permission requests are additive and do not increment the protocol version. Older daemons never
 send a question's optional `permissionRequest`. A client that does not recognize it renders the
-question as an ordinary question, and answering it works the same way.
+question as an ordinary question, and answering it works the same way. The `"native_tool"` source is
+additive in the same way: older daemons never send it, and a client that does not recognize it shows
+a permission request without naming what is asking.
 
 Secret deletion through `DELETE /v0/secrets/:secretId` is additive and does not increment the
 protocol version. An older compatible daemon answers that route with `404` even for a secret that
@@ -8191,6 +8193,35 @@ The question then carries `permissionRequest`:
 A client should present a permission request so the person can tell it apart from the agent's own
 questions, naming `serverTitle` as the party asking. The prompts, options, and answer route are the
 same as for any other question.
+
+A native coding agent, Claude Code or Codex CLI running under Happy, asks the same way when it wants
+to take an action its permission mode does not already allow. This happens only in `read_only` and
+`workspace_write`: in `auto` the action is reviewed automatically and never becomes a question, and
+`full_access` allows it. The question then carries:
+
+```json
+{
+    "source": "native_tool",
+    "provider": "codex",
+    "providerTitle": "Codex",
+    "action": "npm install left-pad",
+    "inputDigest": "sha256:9f2c4b1e0d7a6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b"
+}
+```
+
+- `source` — `"native_tool"`.
+- `provider` — `"claude"` or `"codex"`, the canonical key of the agent asking.
+- `providerTitle` — its display name, 1–128 characters, which clients show instead of `provider`.
+- `action` — what the agent wants to do, as it described the action: a command line, a tool name, or
+  a file change. 1–2,000 characters.
+- `inputDigest` — `sha256:` followed by 64 lowercase hex characters: the SHA-256 of the exact tool
+  input the agent will run if allowed, serialized as JSON with object keys sorted. An allowed action
+  runs with exactly that input.
+
+The question has exactly one prompt, whose options are `Allow once` and `Deny`. Only the value
+`Allow once` allows the action. Any other answer, a canceled question, an aborted run, or a daemon
+restart while the question is open denies it. The decision covers that one action; it never allows a
+later action or becomes a standing rule.
 
 #### `GET /v0/agents/:agentId/question`
 

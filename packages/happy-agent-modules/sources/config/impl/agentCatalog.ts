@@ -30,6 +30,7 @@ import {
     type ProviderModelCompatibilityType,
     type ProviderUsage,
 } from "@slopus/happy-providers";
+import type { UserInputModule } from "../../userInput/index.js";
 import type { HappyAgentConfigValues, HappyAgentConfiguration } from "../ConfigModule.js";
 import { RoundRobinRouterProvider } from "./RoundRobinRouterProvider.js";
 import {
@@ -583,6 +584,7 @@ export function agentProviders(
     observations?: ProviderExecutionObservations,
     credentialFailures?: ProviderCredentialFailures,
     accountFailures?: ProviderAccountFailures,
+    userInput?: () => UserInputModule | undefined,
 ): AgentProviders {
     const providers = new AgentProviders();
     const retryLimit = configuration.values.settings.inferenceMaxRetries;
@@ -632,7 +634,11 @@ export function agentProviders(
                     }
                     const concrete =
                         foreign !== undefined
-                            ? createForeignAgentProvider(foreign, configuration.paths.agentHome)
+                            ? createForeignAgentProvider(
+                                  foreign,
+                                  configuration.paths.agentHome,
+                                  userInput,
+                              )
                             : await createProvider(
                                   id,
                                   provider as Exclude<

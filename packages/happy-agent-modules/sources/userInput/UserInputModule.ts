@@ -10,6 +10,12 @@ import { Value } from "@sinclair/typebox/value";
 import { afterCommit, type Context } from "@steve.kite/stdlib";
 
 import { PresenceModule } from "../presence/index.js";
+import {
+    NATIVE_TOOL_ALLOW,
+    NATIVE_TOOL_QUESTION_ID,
+    nativeToolPermissionQuestion,
+    type NativeToolPermission,
+} from "./impl/nativeToolPermissionQuestion.js";
 
 import {
     assertUserInputAnswer,
@@ -214,6 +220,41 @@ export class UserInputModule implements AgentModule {
             ),
         );
         return structuredClone(request);
+    }
+
+    /**
+     * Asks the person whether a native coding agent may take one action, and waits for them.
+     * Resolves `true` only for an explicit `Allow once`. A denial, any other answer, a withdrawn
+     * question, or `signal` aborting resolves `false`; aborting also withdraws the question so it
+     * never waits on an answer nobody will act on.
+     */
+    async askForNativeToolPermission(
+        ctx: Context,
+        agentId: string,
+        permission: NativeToolPermission,
+        signal: AbortSignal,
+    ): Promise<boolean> {
+        if (signal.aborted) return false;
+        const { input, permissionRequest } = nativeToolPermissionQuestion(permission);
+        const pending = await this.askForPermission(ctx, agentId, input, permissionRequest);
+        const withdraw = (): void => {
+            this.cancel(ctx, agentId, {
+                requestId: pending.id,
+                reason: `${permission.providerTitle} no longer needs an answer.`,
+            }).catch((error: unknown) => {
+                ctx.log.warn(
+                    `Could not withdraw the permission question from ${permission.providerTitle}: ${String(error)}`,
+                );
+            });
+        };
+        signal.addEventListener("abort", withdraw, { once: true });
+        if (signal.aborted) withdraw();
+        const settled = await this.wait(ctx, agentId, pending.id).finally(() =>
+            signal.removeEventListener("abort", withdraw),
+        );
+        if (settled.status !== "answered" || signal.aborted) return false;
+        const values = nativeToolAnswerValues(settled.answers?.[NATIVE_TOOL_QUESTION_ID]);
+        return values.length === 1 && values[0] === NATIVE_TOOL_ALLOW;
     }
 
     async wait(
@@ -1427,4 +1468,17 @@ function now(): number {
 /** Fresh opaque identity for a request or an event. */
 function newIdentity(): string {
     return globalThis.crypto.randomUUID().replaceAll("-", "");
+}
+
+/** The values one answer holds: selected option labels, then any free text. */
+function nativeToolAnswerValues(answer: unknown): string[] {
+    if (typeof answer === "string") return [answer];
+    if (answer === null || typeof answer !== "object") return [];
+    const record = answer as Record<string, unknown>;
+    const selected = Array.isArray(record["selectedOptions"])
+        ? record["selectedOptions"].filter((value): value is string => typeof value === "string")
+        : [];
+    return typeof record["text"] === "string" && record["text"].length > 0
+        ? [...selected, record["text"]]
+        : selected;
 }

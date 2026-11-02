@@ -35,13 +35,34 @@ export interface QuestionSecretRequest {
  * and name `serverTitle` as the party asking. Treat an unknown `source` as a
  * permission request from an unnamed party.
  */
-export interface QuestionPermissionRequest {
+export type QuestionPermissionRequest =
+    | QuestionMcpPermissionRequest
+    | QuestionNativeToolPermissionRequest;
+
+export interface QuestionMcpPermissionRequest {
     /** `"mcp_elicitation"`: an MCP server elicitation during an agent tool call. */
     source: "mcp_elicitation";
     /** The configured MCP server name, 1–128 characters. */
     server: string;
     /** The server's display name, 1–128 characters. */
     serverTitle: string;
+}
+
+/**
+ * A native coding agent (Claude Code or Codex CLI) asking to take one action its permission
+ * mode does not allow. The only prompt's options are `Allow once` and `Deny`; anything but
+ * `Allow once` denies it. Absent from daemons that predate it.
+ */
+export interface QuestionNativeToolPermissionRequest {
+    source: "native_tool";
+    /** The canonical key of the agent asking. */
+    provider: "claude" | "codex";
+    /** Its display name, 1–128 characters. */
+    providerTitle: string;
+    /** What the agent wants to do, as it described it, 1–2,000 characters. */
+    action: string;
+    /** `sha256:` + 64 hex characters of the exact tool input, keys sorted. */
+    inputDigest: string;
 }
 
 /** One prompt inside a question. */

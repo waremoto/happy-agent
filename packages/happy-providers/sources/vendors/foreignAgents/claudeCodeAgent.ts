@@ -41,12 +41,16 @@ export const claudeCodeAgent: ForeignAgent = {
                     : [{ configId: "effort", value: effort }]),
             ];
         },
-        permissionOptions: (mode) => [
+        // Read only is Claude's plan mode, unless a person is asked: then Claude's default mode
+        // asks about every write, and the person answers each one.
+        permissionOptions: (mode, asksPerson) => [
             {
                 configId: "mode",
                 value:
                     mode === "read_only"
-                        ? "plan"
+                        ? asksPerson
+                            ? "default"
+                            : "plan"
                         : mode === "workspace_write"
                           ? "acceptEdits"
                           : mode === "auto"

@@ -41,6 +41,7 @@ import {
 } from "@steve.kite/stdlib";
 import { parse, stringify, TomlDate, type TomlTable, type TomlValue } from "smol-toml";
 
+import type { UserInputModule } from "../userInput/index.js";
 import { getManagedProjectsDirectory } from "../impl/managedProjectsDirectory.js";
 import { getManagedWorkspacesDirectory } from "../impl/managedWorkspacesDirectory.js";
 import { isUserOriginMetadata } from "../impl/messageOrigin.js";
@@ -2189,6 +2190,18 @@ export class ConfigModule implements AgentModule {
         }
     }
 
+    /**
+     * The module that puts native agents' permission requests to the person. User input depends on
+     * presence, which depends on this module, so it joins after construction; until then native
+     * agents keep their mode's own answer.
+     */
+    #userInput: UserInputModule | undefined;
+
+    /** Lets Claude Code and Codex ask the person about actions outside their permission mode. */
+    useUserInput(userInput: UserInputModule): void {
+        this.#userInput = userInput;
+    }
+
     readonly #hooks: AgentModuleHooks = {
         messageAccepted: async (_ctx, scope, accepted): Promise<void> => {
             if (accepted.message.role !== "user" || !isUserOriginMetadata(accepted.metadata))
@@ -3550,6 +3563,7 @@ export class ConfigModule implements AgentModule {
                 this.#executionObservations,
                 this.#credentialFailures,
                 this.#accountFailures,
+                () => this.#userInput,
             );
             // A test-owned inference registry is already authenticated. Initialize all its
             // accounts as usable, including canonical IDs whose production defaults are off. This

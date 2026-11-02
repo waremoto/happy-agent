@@ -1,4 +1,5 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +14,7 @@ import type { SessionEvent } from "@/core/SessionEvent.js";
 import {
     AcpProvider,
     type AcpAgentProfile,
+    type AcpAskPerson,
     type AcpPermissionMode,
 } from "@/protocol/acp/AcpProvider.js";
 import type { AcpSession } from "@/protocol/acp/AcpSession.js";
@@ -42,7 +44,9 @@ afterEach(async () => {
     await Promise.all(open.splice(0).map((session) => session.destroy()));
 });
 
-function harness(options: { steerable?: boolean; profile?: AcpAgentProfile } = {}) {
+function harness(
+    options: { steerable?: boolean; profile?: AcpAgentProfile; askPerson?: AcpAskPerson } = {},
+) {
     const directory = mkdtempSync(join(tmpdir(), "acp-session-"));
     const logPath = join(directory, "agent.jsonl");
     let permissionMode: AcpPermissionMode = "auto";
@@ -80,11 +84,17 @@ function harness(options: { steerable?: boolean; profile?: AcpAgentProfile } = {
               }
             : {}),
         stateDirectory: join(directory, "state"),
-        environment: () => ({ cwd: directory, permissionMode }),
+        environment: () => ({
+            cwd: directory,
+            permissionMode,
+            ...(options.askPerson === undefined ? {} : { askPerson: options.askPerson }),
+        }),
         profile: options.profile ?? {
             modelOptions: (model) =>
                 model === undefined ? [] : [{ configId: "model", value: model }],
-            permissionOptions: (mode) => [{ configId: "mode", value: mode }],
+            permissionOptions: (mode, asksPerson) => [
+                { configId: "mode", value: asksPerson ? `${mode}+ask` : mode },
+            ],
         },
     });
     const messages: SessionMessage[] = [];
@@ -738,4 +748,110 @@ describe("AcpSession", () => {
             );
         },
     );
+});
+
+describe("AcpSession native permission requests", () => {
+    const written = (directory: string) => existsSync(join(directory, "approval-test.txt"));
+    const digest = `sha256:${createHash("sha256")
+        .update('{"content":"APPROVED","file_path":"approval-test.txt"}')
+        .digest("hex")}`;
+
+    it("puts a Read only action to the person with its exact input, and runs it only when they allow it once", async () => {
+        const asked: unknown[] = [];
+        const h = harness({
+            askPerson: async (question) => {
+                asked.push(question);
+                return true;
+            },
+        });
+        h.setPermissionMode("read_only");
+        const session = await h.session();
+        h.user("please ask to write");
+        expect(text(await h.run(session))).toBe("wrote");
+        expect(asked).toEqual([
+            {
+                action: "Write approval-test.txt",
+                input: { file_path: "approval-test.txt", content: "APPROVED" },
+                inputDigest: digest,
+            },
+        ]);
+        expect(written(h.directory)).toBe(true);
+        // The harness is told a person answers, so it can stop auto-deciding by mode.
+        expect(
+            h
+                .log()
+                .filter((e) => e.method === "setSessionConfigOption")
+                .map((e) => e.value),
+        ).toContain("read_only+ask");
+    }, 30_000);
+
+    it("never runs a Workspace write action the person denies", async () => {
+        const h = harness({ askPerson: async () => false });
+        h.setPermissionMode("workspace_write");
+        const session = await h.session();
+        h.user("please ask to write");
+        expect(text(await h.run(session))).toBe("refused");
+        expect(written(h.directory)).toBe(false);
+        expect(h.log().find((e) => e.method === "permission")).toMatchObject({ allowed: false });
+    }, 30_000);
+
+    it("treats a failed or withdrawn question as a denial", async () => {
+        const h = harness({
+            askPerson: async () => {
+                throw new Error("question withdrawn");
+            },
+        });
+        h.setPermissionMode("read_only");
+        const session = await h.session();
+        h.user("please ask to write");
+        expect(text(await h.run(session))).toBe("refused");
+        expect(written(h.directory)).toBe(false);
+    }, 30_000);
+
+    it("denies without asking once the turn is stopped", async () => {
+        const turn = new AbortController();
+        let asks = 0;
+        const h = harness({
+            askPerson: async (_question, signal) => {
+                asks += 1;
+                // The person never answers; stopping the turn withdraws the question.
+                turn.abort();
+                return await new Promise<boolean>((resolve) => {
+                    if (signal.aborted) resolve(false);
+                    signal.addEventListener("abort", () => resolve(false), { once: true });
+                });
+            },
+        });
+        h.setPermissionMode("read_only");
+        const session = await h.session();
+        h.user("please ask to write");
+        await h.run(session, turn.signal);
+        await h.waitForLog((e) => e.method === "permission");
+        expect(asks).toBe(1);
+        expect(written(h.directory)).toBe(false);
+    }, 30_000);
+
+    it("leaves Auto and Full access to their own policy and never asks the person", async () => {
+        let asks = 0;
+        const h = harness({
+            askPerson: async () => {
+                asks += 1;
+                return false;
+            },
+        });
+        h.setPermissionMode("auto");
+        const session = await h.session();
+        h.user("please ask to write");
+        expect(text(await h.run(session))).toBe("wrote");
+        expect(asks).toBe(0);
+    }, 30_000);
+
+    it("keeps the mode's own answer when no person can be asked", async () => {
+        const h = harness();
+        h.setPermissionMode("read_only");
+        const session = await h.session();
+        h.user("please ask to write");
+        expect(text(await h.run(session))).toBe("refused");
+        expect(written(h.directory)).toBe(false);
+    }, 30_000);
 });

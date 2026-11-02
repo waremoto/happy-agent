@@ -1,16 +1,18 @@
 import { mkdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
-import { agentModuleConfig, agentPermissionMode } from "@slopus/happy-agent-base";
+import { agentId, agentModuleConfig, agentPermissionMode } from "@slopus/happy-agent-base";
 import {
     AcpProvider,
     foreignAgent,
+    type AcpAskPerson,
     type AcpTurnEnvironment,
     type ForeignAgent,
     type ForeignAgentStart,
 } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
+import type { UserInputModule } from "../../userInput/index.js";
 import type { HappyAgentConfigValues, HappyAgentConfiguration } from "../ConfigModule.js";
 import {
     harnessAcceptsProvider,
@@ -117,14 +119,52 @@ export function happyHarnessAccepts(
 export function createForeignAgentProvider(
     route: ForeignAgentRoute,
     agentHome: string,
+    userInput?: () => UserInputModule | undefined,
 ): AcpProvider {
     const directory = foreignAgentDirectory(agentHome, route);
     return new AcpProvider({
         connect: route.agent.connect(foreignAgentStart(route)),
         stateDirectory: directory,
-        environment: (ctx) => foreignAgentTurnEnvironment(ctx, directory),
+        environment: (ctx) => foreignAgentTurnEnvironment(ctx, directory, route, userInput?.()),
         profile: route.agent.profile,
     });
+}
+
+/** The native agents whose actions the person is asked about, by canonical provider key. */
+const PERSON_ASKING_PROVIDERS = {
+    claude: "Claude Code",
+    codex: "Codex",
+} as const;
+
+/**
+ * How a native agent's action outside its permission mode reaches the person: as a question on
+ * the Happy agent running it. Only Claude Code and Codex ask, and only for a turn that belongs to
+ * an agent; anything else keeps the mode's own answer.
+ */
+function foreignAgentAskPerson(
+    ctx: Context,
+    route: ForeignAgentRoute,
+    userInput: UserInputModule | undefined,
+): AcpAskPerson | undefined {
+    const provider = route.provider.type;
+    if (userInput === undefined || (provider !== "claude" && provider !== "codex")) {
+        return undefined;
+    }
+    const asking = agentId(ctx);
+    if (asking === undefined) return undefined;
+    return async (question, signal) =>
+        await userInput.askForNativeToolPermission(
+            ctx,
+            asking,
+            {
+                provider,
+                providerTitle: PERSON_ASKING_PROVIDERS[provider],
+                action: question.action,
+                input: question.input,
+                inputDigest: question.inputDigest,
+            },
+            ctx.lifetime === undefined ? signal : AbortSignal.any([signal, ctx.lifetime]),
+        );
 }
 
 /** The private directory one route keeps its state in. */
@@ -182,10 +222,20 @@ function codexHome(authFile: string): string {
  * A request without an agent's compute, such as naming a chat, still starts a whole foreign
  * agent. It gets an empty private folder and read-only access instead of the daemon's own folder.
  */
-function foreignAgentTurnEnvironment(ctx: Context, stateDirectory: string): AcpTurnEnvironment {
+function foreignAgentTurnEnvironment(
+    ctx: Context,
+    stateDirectory: string,
+    route: ForeignAgentRoute,
+    userInput: UserInputModule | undefined,
+): AcpTurnEnvironment {
     const compute = agentModuleConfig(ctx, "compute");
     if (typeof compute?.["cwd"] === "string" && compute["cwd"].length > 0) {
-        return { cwd: compute["cwd"], permissionMode: agentPermissionMode(ctx) };
+        const askPerson = foreignAgentAskPerson(ctx, route, userInput);
+        return {
+            cwd: compute["cwd"],
+            permissionMode: agentPermissionMode(ctx),
+            ...(askPerson === undefined ? {} : { askPerson }),
+        };
     }
     const cwd = join(stateDirectory, "detached");
     mkdirSync(cwd, { recursive: true, mode: 0o700 });
