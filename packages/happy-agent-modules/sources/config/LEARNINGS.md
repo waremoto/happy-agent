@@ -571,3 +571,13 @@ or it silently tests the wrong thing. `nativeToolApproval.live.test.ts` also rem
 child Claude does not join that session's host. Live, Claude first named a write only by its tool
 (`Write`); its permission requests now use the same title as its tool rows (`Write: <path>`,
 `Bash: <command>`), and the live test requires the file name in the question.
+
+## Native session lifecycle, proven live with markers that live in one place
+
+`nativeSessionLifecycle.live.test.ts` tells history from continuation by where each marker exists:
+a seeded word only in Happy's history (a fresh session replays it), and a word only in a file the
+agent read and that was then deleted (only the native thread can know it after a restart, since
+the restored session receives just the new message). Both Claude Code and Codex passed both, and a
+turn stopped during an approved 20-second command ended at once with nothing written. Claude in
+Read only, which uses its default mode while a person answers, asks even before reading a file in
+its working folder, so a test that needs a read must allow it.
