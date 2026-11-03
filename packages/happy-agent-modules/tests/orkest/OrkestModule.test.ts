@@ -7,7 +7,7 @@ import { AgentProviders, withAgentDatabase } from "@slopus/happy-agent-base";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ConfigModule } from "../../sources/config/index.js";
-import { OrkestModule, derivedId } from "../../sources/orkest/index.js";
+import { OrkestAgencyClient, OrkestModule, derivedId } from "../../sources/orkest/index.js";
 import {
     startHappyAgentRuntime,
     type HappyAgentRuntime,
@@ -30,6 +30,7 @@ interface Call {
     method: string;
     path: string;
     body: unknown;
+    workerToken: string | undefined;
 }
 
 /**
@@ -60,7 +61,13 @@ async function fakeAgency() {
     const server: Server = createServer(async (request, response) => {
         const body = await read(request);
         const url = new URL(request.url ?? "/", "http://agency");
-        calls.push({ method: request.method ?? "", path: url.pathname, body });
+        const workerToken = request.headers["x-orkest-worker-token"];
+        calls.push({
+            method: request.method ?? "",
+            path: url.pathname,
+            body,
+            workerToken: typeof workerToken === "string" ? workerToken : undefined,
+        });
         const send = (status: number, value: unknown) => {
             response.writeHead(status, { "Content-Type": "application/json" });
             response.end(JSON.stringify(value));
@@ -251,6 +258,38 @@ describe("Orkest attended owner", () => {
             state: "refused",
             lastError: "Orkest sessions need [features] attended_only = true.",
         });
+    }, 30_000);
+
+    it("sends its own worker token on every owner call when a token file is configured", async () => {
+        // ORKEST-AGENCY.4.4a/4.4d: on a host with several agencies Father scopes the owner lane by this
+        // token and ignores the worker id in the request; without the file nothing changes.
+        const agency = await fakeAgency();
+        const root = await mkdtemp(join(tmpdir(), "happy-orkest-worker-"));
+        cleanups.push(async () => await rm(root, { recursive: true, force: true }));
+        const tokenFile = join(root, "orkest.token");
+        await writeFile(tokenFile, TOKEN);
+        const workerTokenFile = join(root, "orkest-worker.token");
+        await writeFile(workerTokenFile, "okw_worker-secret\n");
+        vi.stubEnv("ORKEST_AGENCY_URL", agency.url);
+        vi.stubEnv("ORKEST_AGENCY_TOKEN_FILE", tokenFile);
+        vi.stubEnv("ORKEST_WORKER_TOKEN_FILE", workerTokenFile);
+        const config = await testConfigRootedAt(root, "[features]\nattended_only = true\n");
+        const endpoint = config.orkestAgency;
+        expect(endpoint).toMatchObject({ workerToken: "okw_worker-secret" });
+        const client = new OrkestAgencyClient(endpoint!);
+        expect(await client.pending()).toHaveLength(1);
+        await client.active("happy:test");
+        expect(agency.calls.map((c) => c.workerToken)).toEqual([
+            "okw_worker-secret",
+            "okw_worker-secret",
+        ]);
+
+        vi.stubEnv("ORKEST_WORKER_TOKEN_FILE", "");
+        const plain = (await testConfigRootedAt(root, "[features]\nattended_only = true\n"))
+            .orkestAgency!;
+        expect(plain.workerToken).toBeUndefined();
+        await new OrkestAgencyClient(plain).pending();
+        expect(agency.calls.at(-1)?.workerToken).toBeUndefined();
     }, 30_000);
 
     it("stays off without an agency URL or a readable token", async () => {

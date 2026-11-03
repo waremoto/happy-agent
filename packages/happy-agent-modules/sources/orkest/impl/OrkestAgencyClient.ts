@@ -5,6 +5,8 @@ export interface OrkestAgencyEndpoint {
     readonly url: string;
     readonly token: string;
     readonly workerId: string;
+    /** This worker's own Orkest token; Father then scopes every owner call to its agency. */
+    readonly workerToken?: string;
 }
 
 const nullableString = Type.Union([Type.String(), Type.Null()]);
@@ -136,6 +138,9 @@ export class OrkestAgencyClient {
             method,
             headers: {
                 "X-Ghost-Service-Token": this.#endpoint.token,
+                ...(this.#endpoint.workerToken === undefined
+                    ? {}
+                    : { "X-Orkest-Worker-Token": this.#endpoint.workerToken }),
                 ...(body === undefined ? {} : { "Content-Type": "application/json" }),
             },
             ...(body === undefined ? {} : { body: JSON.stringify(body) }),

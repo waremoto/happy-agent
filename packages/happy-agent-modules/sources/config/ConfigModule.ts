@@ -3661,9 +3661,13 @@ export class ConfigModule implements AgentModule {
      * The Orkest agency this installation opens attended sessions for, from the environment only:
      * `ORKEST_AGENCY_URL` (the Father base URL), `ORKEST_AGENCY_TOKEN_FILE` (a file holding the
      * service token, read here and never logged or exposed) and optional `ORKEST_WORKER_ID`.
+     * Optional `ORKEST_WORKER_TOKEN_FILE` holds this worker's own Orkest token; with it Father scopes
+     * every owner call to this worker's agency (one daemon per agency per machine).
      * `undefined` unless the URL and a readable, non-empty token are both present.
      */
-    get orkestAgency(): { url: string; token: string; workerId: string } | undefined {
+    get orkestAgency():
+        | { url: string; token: string; workerId: string; workerToken?: string }
+        | undefined {
         const url = this.#environmentValue("ORKEST_AGENCY_URL")?.trim();
         const tokenFile = this.#environmentValue("ORKEST_AGENCY_TOKEN_FILE")?.trim();
         if (!url || !tokenFile || url.length > MAX_CONFIG_STRING_LENGTH) return undefined;
@@ -3676,7 +3680,18 @@ export class ConfigModule implements AgentModule {
         if (token.length === 0) return undefined;
         const workerId =
             this.#environmentValue("ORKEST_WORKER_ID")?.trim() || `happy:${hostname()}`;
-        return { url: url.replace(/\/+$/, ""), token, workerId };
+        // A worker token file that is named but unreadable or empty turns Orkest off rather than
+        // falling back to the unscoped lane, which a multi-agency host would refuse anyway.
+        const workerTokenFile = this.#environmentValue("ORKEST_WORKER_TOKEN_FILE")?.trim();
+        if (!workerTokenFile) return { url: url.replace(/\/+$/, ""), token, workerId };
+        let workerToken: string;
+        try {
+            workerToken = readFileSync(workerTokenFile, "utf8").trim();
+        } catch {
+            return undefined;
+        }
+        if (workerToken.length === 0) return undefined;
+        return { url: url.replace(/\/+$/, ""), token, workerId, workerToken };
     }
 
     /**
