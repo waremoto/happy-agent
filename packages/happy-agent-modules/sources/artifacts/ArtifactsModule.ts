@@ -249,7 +249,7 @@ export class ArtifactsModule implements AgentModule {
             writeArtifactFileTool(this, scope.agent.id),
             editArtifactFileTool(this, scope.agent.id),
             updateArtifactTool(this, this.#compute, scope.agent.id),
-            listArtifactsTool(this, scope.agent.id),
+            listArtifactsTool(this, scope.agent.id, { hereOnly: this.#config.attendedOnly }),
             readArtifactTool(this),
             readArtifactFileTool(this),
             deleteArtifactTool(this, scope.agent.id),

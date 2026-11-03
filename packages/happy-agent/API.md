@@ -1561,7 +1561,18 @@ Field groups:
     - onboarding sends Happy no hidden instructions;
     - peer messaging, exported bots, and the mobile connector are off;
     - agents cannot create subagents or subtasks, or message bots and task agents;
-    - the Spaces prioritizing agent never wakes on its own.
+    - the Spaces prioritizing agent never wakes on its own;
+    - agents are not offered the secret tools (`create_secret`, `update_secret`,
+      `attach_secret`, `detach_secret`, `list_secrets`, `reference_secret`), MCP configuration
+      (`configure_mcp_server`, `reload_mcp_servers`), bot and exported-bot management
+      (`send_bot_message`, `create_bot`, `update_bot_settings`, `set_bot_name`, `set_bot_avatar`,
+      `approve_exported_bot_user`, `deny_exported_bot_user`, `remove_exported_bot`,
+      `set_telegram_exported_bot`, `set_bridge_exported_bot`), or calendar writes
+      (`create_calendar_event`, `update_calendar_event`, `delete_calendar_event`); the hosting
+      service grants such access itself. Calendar reads remain. The same reduced set is what a
+      native harness sees through the tool bridge;
+    - `list_artifacts` lists only artifacts made where the agent works, and its `scope` is
+      ignored.
 
     A run that a daemon restart interrupted still resumes in the next process, and its durable
     tool calls still complete, because that run was started by a person. `attendedOnly` is

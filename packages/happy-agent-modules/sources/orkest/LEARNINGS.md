@@ -24,10 +24,23 @@ about Orkest sessions is stored in Happy's database beyond the tasks themselves.
 
 ## Settings come from the environment, not happy.toml
 
-`ORKEST_AGENCY_URL`, `ORKEST_AGENCY_TOKEN_FILE` and `ORKEST_WORKER_ID` are read by
-`ConfigModule.orkestAgency`. Keeping them out of the configuration file kept `API.md` and
+`ORKEST_AGENCY_URL`, `ORKEST_AGENCY_TOKEN_FILE`, `ORKEST_WORKER_ID` and the optional
+`ORKEST_WORKER_TOKEN_FILE` are read by `ConfigModule.orkestAgency`. The worker token is this
+daemon's own (one daemon per agency per machine); with it Orkest scopes every owner call to that
+agency, and a named but unreadable file turns the owner off rather than falling back to the
+unscoped lane. Keeping them out of the configuration file kept `API.md` and
 `GET /v0/config` unchanged. The module refuses to run unless `[features] attended_only = true`,
 because an Orkest-hosted Happy that could start work itself would be a second scheduler.
+
+## Attended-only hides tools at the final list, not per module
+
+A live probe of an attended Read only session found about 90 Happy tools offered to the native
+agent, including the installation-wide secret catalog, MCP configuration, bot messaging and
+calendar writes; each asked the person first, but asking is not a boundary for an agency host.
+The operator authorized removing them (2026-11-03). This module's `overrideTools` filters the
+agent's final tool list when `attended_only` is on, so the tool bridge a native harness reads
+offers the same reduced set. One list in one place, tested against the real tool factories so a
+renamed tool fails the test instead of silently reappearing.
 
 ## A runtime test without attended-only does not close cleanly with an empty script
 

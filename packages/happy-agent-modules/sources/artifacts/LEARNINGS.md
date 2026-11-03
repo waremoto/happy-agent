@@ -60,6 +60,13 @@ that is a bot's or a task's, or belongs to a workspace or a project root, names 
 acting agent stays the source's `agentId`. A conversation that belongs to none of them is an
 `agent` source. A project's root workspace has the project's own ID, so it reads as the project.
 
+## Attended-only lists only the conversation's own place
+
+`list_artifacts` defaults to every artifact in the installation. In an attended Orkest session
+that returned another task's artifact and a bot's sidebar artifact, which crosses the work item.
+With `[features] attended_only` on, the tool always lists by the acting agent's source, whatever
+`scope` asks, and says so in its description.
+
 ## HTML artifacts can be apps with data of their own
 
 Steve asked for HTML artifacts to get a realtime key-value API, shared between users and kept in

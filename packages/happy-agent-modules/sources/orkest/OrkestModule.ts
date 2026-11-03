@@ -16,6 +16,7 @@ import {
     type AttendedSession,
     type OrkestAgencyEndpoint,
 } from "./impl/OrkestAgencyClient.js";
+import { attendedToolScope } from "./impl/attendedToolScope.js";
 
 /** How often the owner reads Orkest; a person who just clicked waits at most this long. */
 const POLL_MS = 2_000;
@@ -74,6 +75,11 @@ export class OrkestModule implements AgentModule {
     readonly beforeStart = (ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
         this.#agents = agents;
         return {
+            // Every agent's final tool list, so the tools handed to a native harness through the
+            // bridge are the same reduced set (ORKEST-AGENCY.4.4d).
+            ...(this.#config.attendedOnly === true
+                ? { overrideTools: (_hookCtx, _scope, input) => attendedToolScope(input.tools) }
+                : {}),
             afterStart: () => {
                 const endpoint = this.#config.orkestAgency;
                 if (endpoint === undefined) return;

@@ -32,8 +32,16 @@ const artifactToolPageSchema = Type.Object({
 });
 type ArtifactToolPage = Static<typeof artifactToolPageSchema>;
 
-/** List a bounded page of the shared artifact catalog, newest first. */
-export function listArtifactsTool(artifacts: ArtifactsModule, agentId: string) {
+/**
+ * List a bounded page of the shared artifact catalog, newest first. `hereOnly` (an attended-only
+ * installation) lists only what was made where this conversation works, whatever scope is asked.
+ */
+export function listArtifactsTool(
+    artifacts: ArtifactsModule,
+    agentId: string,
+    options: { readonly hereOnly?: boolean } = {},
+) {
+    const hereOnly = options.hereOnly === true;
     return defineAgentTool({
         name: "list_artifacts",
         defer: true,
@@ -44,8 +52,9 @@ export function listArtifactsTool(artifacts: ArtifactsModule, agentId: string) {
             "published reports",
             "artifact catalog",
         ],
-        description:
-            'List artifacts in this installation\'s shared catalog, newest first. Each line shows the artifact\'s ID, type, title, latest version, file count, last change, and where it was made. Omit scope or pass "all" for every artifact; pass "here" for only those made in the bot, task, project, or workspace you are working in. Filter by type if you like. Deleted artifacts are left out unless includeDeleted is true. Results are paged; pass nextCursor back as cursor to read on. Read one with read_artifact.',
+        description: hereOnly
+            ? "List artifacts made in the bot, task, project, or workspace you are working in, newest first. This installation is attended-only, so artifacts made elsewhere are not listed and scope is ignored. Each line shows the artifact's ID, type, title, latest version, file count, last change, and where it was made. Filter by type if you like. Deleted artifacts are left out unless includeDeleted is true. Results are paged; pass nextCursor back as cursor to read on. Read one with read_artifact."
+            : 'List artifacts in this installation\'s shared catalog, newest first. Each line shows the artifact\'s ID, type, title, latest version, file count, last change, and where it was made. Omit scope or pass "all" for every artifact; pass "here" for only those made in the bot, task, project, or workspace you are working in. Filter by type if you like. Deleted artifacts are left out unless includeDeleted is true. Results are paged; pass nextCursor back as cursor to read on. Read one with read_artifact.',
         parameters: listArtifactsToolInputSchema,
         returnType: artifactToolPageSchema,
         durable: false,
@@ -61,7 +70,7 @@ export function listArtifactsTool(artifacts: ArtifactsModule, agentId: string) {
                 limit: input.limit ?? MAX_TOOL_PAGE_SIZE,
             };
             let here: string | undefined;
-            if (input.scope === "here") {
+            if (hereOnly || input.scope === "here") {
                 const { source } = await artifacts.actorFor(ctx, agentId);
                 query.sourceKind = source.kind;
                 query.sourceId = artifactSourceId(source);
