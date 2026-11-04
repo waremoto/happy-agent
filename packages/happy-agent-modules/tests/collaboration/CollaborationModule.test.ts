@@ -1911,7 +1911,9 @@ async function harnessConfig(extra = "") {
         ].join("\n"),
         { mode: 0o755 },
     );
-    return await temporaryTestConfig(`${HARNESSES_TOML}\nenv = { AGY_BIN = "${agy}" }\n${extra}`);
+    return await temporaryTestConfig(
+        `${HARNESSES_TOML}\nenv = { AGY_BIN = "${agy.replace(/\\/g, "/")}" }\n${extra}`,
+    );
 }
 
 const ON_HAPPY = { provider: "claude", model: "opus-5" } as const;
@@ -2188,6 +2190,21 @@ describe("sub-agent harnesses", () => {
         expect(listed.text).toContain("antigravity/gemini-3.8-flash");
         expect(listed.text).not.toContain("Usage");
         expect(await hooks.beforeTurn!(ctx, scope, TURN)).toBeUndefined();
+    });
+
+    it("does not steer attended agents when their remembered sub-agent catalog changes", async () => {
+        const collection = new ForeignCollection();
+        const { hooks, ctx } = await started(
+            collection,
+            await harnessConfig("[features]\nattended_only = true"),
+        );
+        const { scope, values } = kvScope(ON_HAPPY);
+        // Persisted catalog state can survive enabling attended-only or a daemon restart.
+        values.set("agentOptionsKnown", "old catalog");
+        await hooks.tools!(ctx, scope);
+        collection.models = FOREIGN_MODELS.slice(0, 1);
+        expect(await hooks.beforeTurn!(ctx, scope, TURN)).toBeUndefined();
+        expect(values.has("agentOptionsChange")).toBe(false);
     });
 });
 

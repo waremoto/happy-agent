@@ -167,3 +167,7 @@ creator's mode is read from the module scope the tool is built with, never from 
 context, because an Auto review may lend that call Full access for one action. The check throws
 before the spawn presentation or the child exists. A first message to a conversation that never
 ran starts it no wider than the sender's mode, since that message is the one that sets it.
+
+## Attended agents do not receive hidden collaborator-catalog steering
+
+The 4.4 live probe resumed Claude after a restart and received a standalone answer to a hidden sub-agent-options update before the queued human message. Collaboration.beforeTurn must return no action when attendedOnly is on, even when old option-catalog state survives from a prior process. Subagents are unavailable in that installation, so the notice is both unnecessary and capable of causing extra native inference. Keep normal-installation catalog-change notices and prompt-cache behavior unchanged. The regression seeds remembered option state, changes the offered catalog, and asserts no steer or pending notice is created.

@@ -617,6 +617,8 @@ export class CollaborationModule implements AgentModule {
             ctx: Context,
             scope: AgentModuleScope,
         ): Promise<readonly AgentModuleAction[] | undefined> => {
+            // Subagents are unavailable here; a hidden catalog steer must not start a native turn.
+            if (this.#config.attendedOnly) return undefined;
             const known = await scope.kv.read(ctx, AGENT_OPTIONS_KNOWN_KEY);
             if (typeof known !== "string") return undefined;
             const current = this.agentOptionsText({
