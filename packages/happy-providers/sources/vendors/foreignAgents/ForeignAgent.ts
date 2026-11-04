@@ -41,6 +41,8 @@ export interface ForeignAgentCredentials {
 
 /** What configuration says about starting one account's agent. */
 export interface ForeignAgentStart {
+    /** The host permits work only within person-started turns. */
+    readonly attendedOnly?: boolean;
     /** The program to start instead of the agent's default, when the agent starts one. */
     readonly command?: string;
     readonly args?: readonly string[];

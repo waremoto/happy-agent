@@ -581,3 +581,7 @@ the restored session receives just the new message). Both Claude Code and Codex 
 turn stopped during an approved 20-second command ended at once with nothing written. Claude in
 Read only, which uses its default mode while a person answers, asks even before reading a file in
 its working folder, so a test that needs a read must allow it.
+
+## Attended policy reaches native Claude scheduling
+
+Happy's MCP tool filter does not control Claude Code's built-in tools. The native route now carries the existing machine attendedOnly policy explicitly through ForeignAgentStart. Claude applies SDK disallowedTools to CronCreate, CronDelete, CronList and ScheduleWakeup for both new and resumed sessions, and its permission callback refuses those names before asking the person. Ordinary installations retain their native scheduling options; ordinary attended tool approvals still reach the person. Keep native scheduling checks distinct from Happy wait/wait_until, which suspend an existing call. This does not certify native subagent or peer-tool isolation, which requires separate live acceptance.

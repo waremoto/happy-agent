@@ -41,6 +41,7 @@ export function isForeignAgentProvider(
  * that harness accepts, or an agent with its own login on the account named after its harness.
  */
 export interface ForeignAgentRoute {
+    readonly attendedOnly?: boolean;
     readonly harnessId: string;
     readonly harness: Harness;
     /** The account its models are listed under. */
@@ -61,6 +62,7 @@ export function foreignAgentRoutes(
             const provider = providers[harnessId];
             if (provider === undefined) continue;
             routes.push({
+                attendedOnly: configuration.values.features.attendedOnly,
                 harnessId,
                 harness,
                 providerId: harnessId,
@@ -73,6 +75,7 @@ export function foreignAgentRoutes(
         for (const [providerId, provider] of Object.entries(providers)) {
             if (!harnessAcceptsProvider(harness, providerId, provider)) continue;
             routes.push({
+                attendedOnly: configuration.values.features.attendedOnly,
                 harnessId,
                 harness,
                 providerId,
@@ -202,6 +205,7 @@ export function foreignAgentStart(route: ForeignAgentRoute): ForeignAgentStart {
                     : { apiKey: provider.apiKey }
                 : {};
     return {
+        ...(route.attendedOnly === true ? { attendedOnly: true } : {}),
         ...(harness.command === undefined ? {} : { command: harness.command }),
         ...(harness.args === undefined ? {} : { args: harness.args }),
         env: { ...agent.credentialEnvironment(credentials), ...harness.env },

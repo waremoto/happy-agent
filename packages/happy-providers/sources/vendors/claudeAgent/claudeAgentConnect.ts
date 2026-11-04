@@ -23,6 +23,8 @@ import { AsyncInputQueue } from "@/vendors/claudeAgent/impl/AsyncInputQueue.js";
 import { claudeAgentUpdates, toolTitle } from "@/vendors/claudeAgent/impl/claudeAgentUpdates.js";
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+// Native scheduling bypasses Happy's reduced MCP tool list.
+const ATTENDED_SCHEDULING_TOOLS = ["CronCreate", "CronDelete", "CronList", "ScheduleWakeup"];
 const MODES: readonly PermissionMode[] = [
     "default",
     "acceptEdits",
@@ -38,9 +40,12 @@ const MODES: readonly PermissionMode[] = [
  * settings and compaction, with Happy's tools reached over the MCP bridge. Its loop takes input
  * mid-turn, so steering joins the running turn instead of interrupting it.
  */
-export function claudeAgentConnect(environment: NodeJS.ProcessEnv): AcpConnect {
+export function claudeAgentConnect(
+    environment: NodeJS.ProcessEnv,
+    attendedOnly = false,
+): AcpConnect {
     return async (_cwd, client) => {
-        const connection = new ClaudeAgentConnection(environment, client);
+        const connection = new ClaudeAgentConnection(environment, client, attendedOnly);
         return {
             conn: connection,
             init: {
@@ -80,6 +85,7 @@ interface ClaudeThread {
 class ClaudeAgentConnection implements AcpAgentConnection {
     readonly #environment: NodeJS.ProcessEnv;
     readonly #client: acp.Client;
+    readonly #attendedOnly: boolean;
     readonly #threads = new Map<string, ClaudeThread>();
     readonly #children = new Set<ChildProcess>();
     #stderr = "";
@@ -89,9 +95,10 @@ class ClaudeAgentConnection implements AcpAgentConnection {
         this.#exit = resolve;
     });
 
-    constructor(environment: NodeJS.ProcessEnv, client: acp.Client) {
+    constructor(environment: NodeJS.ProcessEnv, client: acp.Client, attendedOnly: boolean) {
         this.#environment = environment;
         this.#client = client;
+        this.#attendedOnly = attendedOnly;
     }
 
     async newSession(params: acp.NewSessionRequest): Promise<acp.NewSessionResponse> {
@@ -193,6 +200,7 @@ class ClaudeAgentConnection implements AcpAgentConnection {
                 cwd,
                 ...(resume ? { resume: sessionId } : { sessionId }),
                 mcpServers: Object.fromEntries(mcpServers.map(sdkMcpServer)),
+                ...(this.#attendedOnly ? { disallowedTools: [...ATTENDED_SCHEDULING_TOOLS] } : {}),
                 includePartialMessages: true,
                 // Happy's permission mode decides; full access maps to bypassing Claude's prompts.
                 allowDangerouslySkipPermissions: true,
@@ -206,6 +214,13 @@ class ClaudeAgentConnection implements AcpAgentConnection {
                     ...CLAUDE_SDK_PRIVACY_ENVIRONMENT,
                 },
                 canUseTool: async (toolName, toolInput, { toolUseID }) => {
+                    if (this.#attendedOnly && ATTENDED_SCHEDULING_TOOLS.includes(toolName)) {
+                        return {
+                            behavior: "deny",
+                            message:
+                                "This installation is attended-only: native scheduling is disabled.",
+                        };
+                    }
                     // The title a person approves names what the tool touches, as its row does.
                     const answer = await this.#client.requestPermission({
                         sessionId,

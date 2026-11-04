@@ -13,6 +13,23 @@ import { parseAntigravityUsage } from "../../sources/config/impl/harnessUsage.js
 import { testConfigRootedAt } from "../support/configModule.js";
 
 const roots: string[] = [];
+it("propagates attended-only policy to native harness starts", async () => {
+    const config = await testConfigRootedAt(
+        await root(),
+        [
+            "[features]",
+            "attended_only = true",
+            "[providers.claude]",
+            'type = "claude"',
+            "[harnesses.claude_code]",
+            'providers = ["claude"]',
+        ].join("\n"),
+    );
+    const route = foreignAgentRoutes(config.configuration).find(
+        (r) => r.harnessId === "claude_code",
+    )!;
+    expect(foreignAgentStart(route).attendedOnly).toBe(true);
+});
 afterEach(async () => {
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
