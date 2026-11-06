@@ -129,6 +129,76 @@ export class OrkestAgencyClient {
         );
     }
 
+    async replyInvites(runId: string, fence: number) {
+        const result = await this.#call(
+            "GET",
+            `/internal/agency/dossiers/bot/invites?runId=${runId}&fence=${fence}`,
+        );
+        const schema = Type.Array(
+            Type.Object({
+                dossierId: Type.String(),
+                nodeId: Type.String(),
+                commentId: Type.String(),
+            }),
+        );
+        if (result.status !== 200 || !Value.Check(schema, result.body))
+            throw new Error("Dossier requests unavailable.");
+        return result.body;
+    }
+
+    async annotationAccess(runId: string, fence: number) {
+        const result = await this.#call(
+            "GET",
+            `/internal/agency/dossiers/bot/capabilities?runId=${runId}&fence=${fence}`,
+        );
+        const schema = Type.Array(
+            Type.Object({ dossierId: Type.String(), grantId: Type.String(), tool: Type.String() }),
+        );
+        if (result.status !== 200 || !Value.Check(schema, result.body))
+            throw new Error("Dossier access unavailable.");
+        return result.body;
+    }
+
+    async annotationContext(runId: string, fence: number) {
+        const grants = await this.annotationAccess(runId, fence);
+        return Promise.all(
+            grants
+                .filter((g) => g.tool === "dossier.annotation_context")
+                .map(async (g) => {
+                    const result = await this.#call(
+                        "GET",
+                        `/internal/agency/dossiers/${g.dossierId}/bot/context?runId=${runId}&fence=${fence}&grantId=${g.grantId}`,
+                    );
+                    if (result.status !== 200) throw new Error("Dossier context unavailable.");
+                    return { dossierId: g.dossierId, context: result.body };
+                }),
+        );
+    }
+
+    async answerAnnotation(
+        runId: string,
+        fence: number,
+        input: {
+            dossierId: string;
+            nodeId: string;
+            commentId: string;
+            text: string;
+            commandId: string;
+        },
+    ) {
+        const grant = (await this.annotationAccess(runId, fence)).find(
+            (g) => g.tool === "dossier.answer_annotation" && g.dossierId === input.dossierId,
+        );
+        if (!grant) throw new Error("This run cannot answer in this dossier.");
+        const result = await this.#call(
+            "POST",
+            `/internal/agency/dossiers/${grant.dossierId}/bot/reply?runId=${runId}&fence=${fence}&grantId=${grant.grantId}`,
+            input,
+        );
+        if (result.status !== 200) throw new Error(`Reply refused (${result.status}).`);
+        return "Reply saved on the original annotation.";
+    }
+
     async #call(
         method: "GET" | "POST",
         path: string,

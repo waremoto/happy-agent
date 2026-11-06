@@ -37,7 +37,7 @@ interface Call {
  * Father's agency endpoints, in memory: one attended run waiting for its owner. It answers only the
  * right service token and records every call, so the test sees what the owner asked for.
  */
-async function fakeAgency() {
+async function fakeAgency(withAnnotation = false) {
     const calls: Call[] = [];
     const run = {
         runId: RUN,
@@ -76,6 +76,34 @@ async function fakeAgency() {
         const path = url.pathname;
         if (path === "/internal/agency/attended/pending") {
             return send(200, intent === "pending" ? [run] : []);
+        }
+        if (withAnnotation && path.startsWith("/internal/agency/dossiers/")) {
+            if (
+                workerToken !== "worker" ||
+                url.searchParams.get("runId") !== RUN ||
+                url.searchParams.get("fence") !== "7"
+            )
+                return send(403, {});
+            if (path.endsWith("/bot/invites"))
+                return send(200, [{ dossierId: "d1", nodeId: "n1", commentId: "c1" }]);
+            if (path.endsWith("/bot/capabilities"))
+                return send(200, [
+                    { dossierId: "d1", tool: "dossier.annotation_context", grantId: "read" },
+                    { dossierId: "d1", tool: "dossier.answer_annotation", grantId: "answer" },
+                ]);
+            if (path.endsWith("/bot/context") && url.searchParams.get("grantId") === "read")
+                return send(200, {
+                    handle: "codex",
+                    nodes: [
+                        {
+                            title: "MM-1",
+                            data: { comments: [{ text: "@any check", replyTo: ["any"] }] },
+                        },
+                    ],
+                });
+            if (path.endsWith("/bot/reply") && url.searchParams.get("grantId") === "answer")
+                return send(200, {});
+            return send(403, {});
         }
         if (path === "/internal/agency/attended/active") {
             const mine = intent === "acknowledged" && ["dispatched", "running"].includes(run.state);
@@ -291,6 +319,32 @@ describe("Orkest attended owner", () => {
         await new OrkestAgencyClient(plain).pending();
         expect(agency.calls.at(-1)?.workerToken).toBeUndefined();
     }, 30_000);
+
+    it("reads anchored context and routes a requested reply through this run's own grants", async () => {
+        const agency = await fakeAgency(true);
+        const client = new OrkestAgencyClient({
+            url: agency.url,
+            token: TOKEN,
+            workerId: "test",
+            workerToken: "worker",
+        });
+        const [invite] = await client.replyInvites(RUN, 7);
+        expect(invite).toEqual({ dossierId: "d1", nodeId: "n1", commentId: "c1" });
+        expect(await client.annotationContext(RUN, 7)).toMatchObject([
+            { dossierId: "d1", context: { handle: "codex" } },
+        ]);
+        const input = { ...invite!, commandId: "answer-once", text: "The runtime is online." };
+        await expect(
+            client.answerAnnotation(RUN, 7, { ...input, dossierId: "other" }),
+        ).rejects.toThrow();
+        expect(agency.calls.filter((c) => c.path.endsWith("/reply"))).toHaveLength(0);
+        await client.answerAnnotation(RUN, 7, input);
+        expect(agency.calls.at(-1)).toMatchObject({
+            method: "POST",
+            workerToken: "worker",
+            body: input,
+        });
+    });
 
     it("stays off without an agency URL or a readable token", async () => {
         const root = await mkdtemp(join(tmpdir(), "happy-orkest-off-"));

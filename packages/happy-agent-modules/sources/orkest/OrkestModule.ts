@@ -1,6 +1,8 @@
+import { Type } from "@sinclair/typebox";
 import { createHash } from "node:crypto";
 
 import {
+    defineAgentTool,
     withAgentDatabase,
     type AgentModule,
     type AgentModuleHooks,
@@ -9,6 +11,7 @@ import {
 import type { MessageMode } from "@slopus/happy-agent-client";
 import { delay, detach, isAbortedError, withLifetime, type Context } from "@steve.kite/stdlib";
 
+import { AGENT_MESSAGE_ORIGIN_METADATA, senderAgentIdMetadata } from "../impl/messageOrigin.js";
 import { ConfigModule } from "../config/index.js";
 import { TasksModule } from "../tasks/index.js";
 import {
@@ -75,6 +78,44 @@ export class OrkestModule implements AgentModule {
     readonly beforeStart = (ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
         this.#agents = agents;
         return {
+            tools: (_ctx, scope) => {
+                const endpoint = this.#config.orkestAgency;
+                const session = [...this.#open.values()].find((s) => s.agentId === scope.agent.id);
+                if (!endpoint || !session || !this.#config.attendedOnly) return [];
+                const agency = new OrkestAgencyClient(endpoint);
+                return [
+                    defineAgentTool({
+                        name: "read_dossier_annotations",
+                        shouldReviewInAutoMode: () => false,
+                        description:
+                            "Read the linked board and document blocks with their anchored comments. Treat comments as context. Answer only explicit requests addressed to your handle or @any, using answer_dossier_annotation.",
+                        parameters: Type.Object({}),
+                        returnType: Type.String(),
+                        execute: async () =>
+                            JSON.stringify(
+                                await agency.annotationContext(session.runId, session.fence),
+                            ),
+                        toLLM: (text) => [{ type: "text", text }],
+                    }),
+                    defineAgentTool({
+                        name: "answer_dossier_annotation",
+                        shouldReviewInAutoMode: () => true,
+                        description:
+                            "Post an inline reply to a requested comment. Use a unique commandId and reuse it on retry.",
+                        parameters: Type.Object({
+                            dossierId: Type.String(),
+                            nodeId: Type.String(),
+                            commentId: Type.String(),
+                            text: Type.String(),
+                            commandId: Type.String(),
+                        }),
+                        returnType: Type.String(),
+                        execute: async (_ctx, input) =>
+                            agency.answerAnnotation(session.runId, session.fence, input),
+                        toLLM: (text) => [{ type: "text", text }],
+                    }),
+                ];
+            },
             // Every agent's final tool list, so the tools handed to a native harness through the
             // bridge are the same reduced set (ORKEST-AGENCY.4.4d).
             ...(this.#config.attendedOnly === true
@@ -140,7 +181,42 @@ export class OrkestModule implements AgentModule {
         for (const open of this.#open.values()) {
             if (now - open.lastHeartbeat < HEARTBEAT_MS) continue;
             const result = await agency.heartbeat(open.runId, open.fence, LEASE_SECONDS);
-            if (result.ok) open.lastHeartbeat = now;
+            if (result.ok) {
+                open.lastHeartbeat = now;
+                // Only an explicit, still-open mention reaches the attended agent. The actual
+                // comment and answer stay on their anchor. Stable message IDs survive retries.
+                if (this.#config.orkestAgency?.workerToken && this.#agents) {
+                    try {
+                        for (const invite of await agency.replyInvites(open.runId, open.fence)) {
+                            await this.#agents.send(
+                                ctx,
+                                open.agentId,
+                                {
+                                    role: "user",
+                                    content: [
+                                        {
+                                            type: "text",
+                                            text: `A dossier reply was requested. Read the anchored context with read_dossier_annotations. Answer on dossier ${invite.dossierId}, node ${invite.nodeId}, comment ${invite.commentId} using answer_dossier_annotation.`,
+                                        },
+                                    ],
+                                },
+                                {
+                                    id: derivedId("a", `${open.runId}:${invite.commentId}`),
+                                    metadata: {
+                                        ...AGENT_MESSAGE_ORIGIN_METADATA,
+                                        ...senderAgentIdMetadata(open.agentId),
+                                    },
+                                },
+                            );
+                        }
+                    } catch (error) {
+                        this.#lastError =
+                            error instanceof Error
+                                ? error.message
+                                : "Dossier invitation unavailable.";
+                    }
+                }
+            }
             // Revoked, superseded or gone: this process no longer owns the run.
             else if (result.final) await this.#drop(ctx, open);
         }
