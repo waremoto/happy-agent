@@ -20,6 +20,7 @@ import {
     type OrkestAgencyEndpoint,
 } from "./impl/OrkestAgencyClient.js";
 import { attendedToolScope } from "./impl/attendedToolScope.js";
+import { claudeSessionIdFor } from "./impl/claudeSessionId.js";
 
 /** How often the owner reads Orkest; a person who just clicked waits at most this long. */
 const POLL_MS = 2_000;
@@ -39,6 +40,8 @@ interface OpenSession {
     readonly agentId: string;
     fence: number;
     lastHeartbeat: number;
+    /** The Claude session id Orkest last accepted for this run; re-sent after a restart (a no-op there). */
+    linkedAgentSession?: string;
 }
 
 /**
@@ -176,6 +179,7 @@ export class OrkestModule implements AgentModule {
         }
         for (const session of await agency.pending())
             await this.#start(ctx, agency, session, workerId);
+        for (const open of this.#open.values()) await this.#linkAgentSession(agency, open);
 
         const now = Date.now();
         for (const open of this.#open.values()) {
@@ -272,6 +276,19 @@ export class OrkestModule implements AgentModule {
             modelId,
             permissionMode: session.permissionMode,
         });
+    }
+
+    /**
+     * Once the conversation runs in a Claude session, and whenever Happy replaces that session, report its
+     * id so Orkest's cockpit can load the transcript. No message text leaves Happy this way.
+     */
+    async #linkAgentSession(agency: OrkestAgencyClient, open: OpenSession): Promise<void> {
+        const id = await claudeSessionIdFor(
+            this.#config.configuration.paths.agentHome,
+            open.agentId,
+        );
+        if (id === undefined || id === open.linkedAgentSession) return;
+        if (await agency.linkAgentSession(open.runId, open.fence, id)) open.linkedAgentSession = id;
     }
 
     async #resume(

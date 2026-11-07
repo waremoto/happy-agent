@@ -108,6 +108,24 @@ export class OrkestAgencyClient {
         );
     }
 
+    /**
+     * Tell Orkest which native agent session (the Claude session id) this run's conversation is in, so
+     * the cockpit can show its transcript. Display-only on both sides: `false` for any refusal, never a
+     * throw, so a failed link can never disturb the run itself.
+     */
+    async linkAgentSession(runId: string, fence: number, agentSessionId: string): Promise<boolean> {
+        try {
+            const response = await this.#call(
+                "POST",
+                `/internal/agency/attended/${runId}/agent-session`,
+                { fence, agentSessionId },
+            );
+            return response.status === 200;
+        } catch {
+            return false;
+        }
+    }
+
     /** Proposed, with one session consumed: the person ended it and the budget counts sessions. */
     async complete(runId: string, fence: number, reason: string): Promise<AgencyAnswer> {
         return answer(

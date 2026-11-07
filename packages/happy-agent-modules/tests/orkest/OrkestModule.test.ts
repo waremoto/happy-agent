@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { AgentProviders, withAgentDatabase } from "@slopus/happy-agent-base";
+import { setTimeout as delay } from "node:timers/promises";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ConfigModule } from "../../sources/config/index.js";
@@ -124,6 +126,12 @@ async function fakeAgency(withAnnotation = false) {
                 attempt: run.fence,
                 fenceToken: run.fence,
             });
+        }
+        if (path === `/internal/agency/attended/${RUN}/agent-session`) {
+            const { fence } = body as { fence: number };
+            return fence === run.fence && run.state === "running"
+                ? send(200, { status: "Ok" })
+                : send(409, { status: "StaleFence" });
         }
         if (path === `/internal/agency/runs/${RUN}/complete`) {
             run.state = "proposed";
@@ -345,6 +353,55 @@ describe("Orkest attended owner", () => {
             body: input,
         });
     });
+
+    it("reports the Claude session its conversation runs in, again when Happy replaces it, and nothing else", async () => {
+        const agency = await fakeAgency();
+        const runtime = await happy(agency.url, true);
+        const agentId = derivedId("a", RUN);
+        await expect.poll(() => agency.run.state, { timeout: 20_000 }).toBe("running");
+
+        const links = () =>
+            agency.calls.filter((c) => c.path === `/internal/agency/attended/${RUN}/agent-session`);
+        // No turn has run, so there is no Claude session yet and nothing is reported.
+        await delay(2_500);
+        expect(links()).toHaveLength(0);
+
+        const sessions = join(
+            runtime.modules.config.configuration.paths.agentHome,
+            "foreign-agents",
+            "claude_code",
+            "sessions",
+        );
+        await mkdir(sessions, { recursive: true });
+        const record = (acpSessionId: string) =>
+            writeFile(
+                join(sessions, `${encodeURIComponent(agentId)}.json`),
+                JSON.stringify({ acpSessionId, cwd: "/w", consumed: 1, fingerprint: "f" }),
+            );
+        const first = "5b0c6a1e-3f2d-4c8e-9a71-0d2e4f6b8c13";
+        await record(first);
+        await expect
+            .poll(() => links().map((c) => c.body), { timeout: 10_000 })
+            .toEqual([{ fence: 1, agentSessionId: first }]);
+        // Reported once: later ticks with the same record send nothing.
+        await delay(4_500);
+        expect(links()).toHaveLength(1);
+
+        const second = "9e4d2c1b-7a6f-4e3d-8b2a-1c0f9e8d7a65";
+        await record(second);
+        await expect
+            .poll(() => links().map((c) => c.body), { timeout: 10_000 })
+            .toEqual([
+                { fence: 1, agentSessionId: first },
+                { fence: 1, agentSessionId: second },
+            ]);
+        // Only the id travels: no transcript, message text or path.
+        expect(JSON.stringify(links())).not.toContain("/w");
+
+        // The person ends it, as in the first test, so the runtime closes cleanly.
+        agency.run.endRequestedAt = new Date().toISOString();
+        await expect.poll(() => agency.run.state, { timeout: 20_000 }).toBe("proposed");
+    }, 90_000);
 
     it("stays off without an agency URL or a readable token", async () => {
         const root = await mkdtemp(join(tmpdir(), "happy-orkest-off-"));
