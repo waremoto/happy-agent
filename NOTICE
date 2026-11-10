@@ -1,0 +1,8 @@
+Orkest Chat agent
+Copyright (c) 2026 Maremoto SpA (Waremoto)
+
+This is a fork of Happy Agent (happy-agent) by the Happy contributors,
+https://github.com/slopus/happy-agent, used under the MIT License. It is the
+engine behind Orkest Chat (the Chat tab of Orkest in GhostShell). The original
+copyright notice and license are kept unchanged in LICENSE; Orkest's changes are
+released under the same license.
