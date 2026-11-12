@@ -284,6 +284,12 @@ export interface AgentBaseOptions {
     readonly sendMode?: AgentBaseQueueMode;
     /** Retry every failed stage until it succeeds or the agent is explicitly stopped. */
     readonly retryForever?: boolean;
+    /**
+     * Whether a durable or reloadable tool call interrupted by a restart executes again.
+     * Defaults to true. When false, every interrupted call becomes an error result and nothing
+     * re-runs: an attended installation must not act on a decision no person confirmed since.
+     */
+    readonly retryInterruptedTools?: boolean;
 }
 
 /**
@@ -497,6 +503,8 @@ export class AgentBase {
     readonly #sendMode: AgentBaseQueueMode;
     /** Whether failed stages retry until success or an explicit stop. */
     readonly #retryForever: boolean;
+    /** Whether an interrupted durable or reloadable tool call executes again. */
+    readonly #retryInterruptedTools: boolean;
     /** Consecutive failures used to pace retries across stage boundaries. */
     #failureRetryAttempt = 0;
     /** What the last collected response failed with; a context overflow may reset and retry. */
@@ -845,6 +853,7 @@ export class AgentBase {
         this.#steeringMode = options.steeringMode ?? "one-at-a-time";
         this.#sendMode = options.sendMode ?? "one-at-a-time";
         this.#retryForever = options.retryForever ?? false;
+        this.#retryInterruptedTools = options.retryInterruptedTools ?? true;
     }
 
     /**
@@ -4563,6 +4572,7 @@ export class AgentBase {
 
     /** Whether this call's tool may safely execute again after a crash or deliberate reload. */
     async #isRetryable(ctx: Context, call: SessionToolCallBlock): Promise<boolean> {
+        if (!this.#retryInterruptedTools) return false;
         const tool = (await this.#tools(ctx)).find(
             (candidate) => candidate.name === call.name && candidate.namespace === call.namespace,
         );
