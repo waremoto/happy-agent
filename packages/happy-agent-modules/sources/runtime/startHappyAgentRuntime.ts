@@ -1010,6 +1010,9 @@ export async function startHappyAgentRuntime(
                 provider,
                 providers,
                 retryForever: configuration.values.settings.ethan.enabled,
+                // Attended-only: a run a restart cut off waits for a person's next message, and
+                // none of its in-flight tool calls executes again.
+                resumeInterruptedRuns: !configuration.values.features.attendedOnly,
                 sendMode: "all",
                 shutdownName: "agent-system",
                 steeringMode: "all",

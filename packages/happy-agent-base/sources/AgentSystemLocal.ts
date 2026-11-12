@@ -85,6 +85,13 @@ export interface AgentSystemLocalOptions<Database extends AgentDatabase = AgentD
     readonly sendMode?: AgentBaseQueueMode;
     /** Retry every failed agent stage until it succeeds or the agent is explicitly stopped. */
     readonly retryForever?: boolean;
+    /**
+     * Whether a run a previous process left unfinished carries on by itself when this collection
+     * comes up or the agent is next resolved. Defaults to true. When false, the agent waits for
+     * its next accepted message, and no tool call it had in flight executes again: an attended
+     * installation never acts without a person asking.
+     */
+    readonly resumeInterruptedRuns?: boolean;
     /** Stable name this collection reports to a stdlib graceful-shutdown coordinator. */
     readonly shutdownName?: string;
 }
@@ -134,6 +141,8 @@ export class AgentSystemLocal<
     readonly #sendMode: AgentBaseQueueMode;
     /** Whether every agent retries failed stages until explicitly stopped. */
     readonly #retryForever: boolean;
+    /** Whether an interrupted run carries on by itself, and its tool calls run again. */
+    readonly #resumeInterruptedRuns: boolean;
     /** Exclusive database-backed ownership of this collection's whole durable store. */
     readonly #storageLock: AgentStorageLock;
     /** The identity index and creation-time config fallback; current config lives with the agent. */
@@ -235,7 +244,7 @@ export class AgentSystemLocal<
                 // even though restored run loops do not start until every observation finishes.
                 system.#lifecycle = "open";
                 const active = await system.#start(startCtx);
-                for (const agent of active) agent.start();
+                if (system.#resumeInterruptedRuns) for (const agent of active) agent.start();
                 await system.#afterStart(startCtx);
                 system.#registerShutdown(config.shutdownName ?? "agent-system");
                 if (shutdown.get(systemCtx)?.shuttingDown === true) {
@@ -269,6 +278,7 @@ export class AgentSystemLocal<
         this.#steeringMode = options.steeringMode ?? "one-at-a-time";
         this.#sendMode = options.sendMode ?? "one-at-a-time";
         this.#retryForever = options.retryForever ?? false;
+        this.#resumeInterruptedRuns = options.resumeInterruptedRuns ?? true;
         this.models = [...options.models];
         this.#configs = storage.kv.scoped("config");
         this.#parents = storage.kv.scoped("parent");
@@ -832,6 +842,7 @@ export class AgentSystemLocal<
             provider: this.#provider,
             persistence: this.#persistenceFor(agentId),
             retryForever: this.#retryForever,
+            retryInterruptedTools: this.#resumeInterruptedRuns,
             sendMode: this.#sendMode,
             sharedKV: this.#sharedModuleKV,
             steeringMode: this.#steeringMode,
@@ -871,7 +882,7 @@ export class AgentSystemLocal<
         this.#agents.set(agent.id, agent);
         if (this.#draining) {
             this.#beginAgentDrain(agent);
-        } else if (start && agent.active) {
+        } else if (start && agent.active && this.#resumeInterruptedRuns) {
             agent.start();
         }
     }
