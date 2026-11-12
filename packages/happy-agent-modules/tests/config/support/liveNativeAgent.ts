@@ -142,9 +142,13 @@ export async function liveNativeAgent(
         },
         /**
          * Answer every question the agent raises the same way, so a retry is answered too.
-         * `guard` names a file that must not exist while a question waits.
+         * `guard` names a file that must not exist, or returns true once the action ran, while a
+         * question waits.
          */
-        answerAll(value: string, guard?: string): UserInputRequest[] {
+        answerAll(
+            value: string | ((question: UserInputRequest) => string),
+            guard?: string | (() => boolean),
+        ): UserInputRequest[] {
             const seen: UserInputRequest[] = [];
             const tick = setInterval(async () => {
                 const { userInput } = current;
@@ -153,12 +157,18 @@ export async function liveNativeAgent(
                     if (seen.some((s) => s.id === question.id)) continue;
                     seen.push(question);
                     // Pending is not permission.
-                    if (guard !== undefined && existsSync(join(workspace, guard))) {
+                    const ran =
+                        typeof guard === "function"
+                            ? guard()
+                            : guard !== undefined && existsSync(join(workspace, guard));
+                    if (ran) {
                         throw new Error("The action ran before an answer.");
                     }
                     await userInput.answer(db.context, AGENT, {
                         requestId: question.id,
-                        answers: { approval: value },
+                        answers: {
+                            approval: typeof value === "function" ? value(question) : value,
+                        },
                     });
                 }
             }, 250);
