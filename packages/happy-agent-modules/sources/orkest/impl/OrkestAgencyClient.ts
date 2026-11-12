@@ -24,6 +24,8 @@ export const attendedSessionSchema = Type.Object({
     intentId: nullableString,
     ownerJobRef: nullableString,
     fence: Type.Number(),
+    /** Present only for a session opened from a handoff; read leniently by `readHandoffContinuation`. */
+    continuation: Type.Optional(Type.Unknown()),
 });
 export type AttendedSession = Static<typeof attendedSessionSchema>;
 

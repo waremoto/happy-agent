@@ -21,6 +21,7 @@ import {
 } from "./impl/OrkestAgencyClient.js";
 import { attendedToolScope } from "./impl/attendedToolScope.js";
 import { claudeSessionIdFor } from "./impl/claudeSessionId.js";
+import { handoffContinuationText, readHandoffContinuation } from "./impl/handoffContinuation.js";
 
 /** How often the owner reads Orkest; a person who just clicked waits at most this long. */
 const POLL_MS = 2_000;
@@ -350,7 +351,12 @@ export class OrkestModule implements AgentModule {
         const heading = session.title.startsWith(session.workLabel)
             ? session.title
             : `${session.workLabel}: ${session.title}`;
-        const text = [`Orkest work item ${heading}`, session.brief]
+        const continuation = readHandoffContinuation(session.continuation);
+        const text = [
+            `Orkest work item ${heading}`,
+            session.brief,
+            ...(continuation === undefined ? [] : [handoffContinuationText(continuation)]),
+        ]
             .filter((part) => part.trim().length > 0)
             .join("\n\n")
             .slice(0, 100_000);
