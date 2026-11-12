@@ -450,6 +450,27 @@ describe("TasksModule", () => {
         }
     });
 
+    it("refuses an agent messaging a task agent on an attended-only installation", async () => {
+        const fixture = await started("tasks-attended-message", { attendedOnly: true });
+        try {
+            const bot = await fixture.bots.create(fixture.database.context, { name: "Planner" });
+            const task = await fixture.tasks.create(fixture.database.context, { name: "Research" });
+            await expect(
+                fixture.tasks.sendMessage(
+                    fixture.database.context,
+                    bot.agentId,
+                    task.id,
+                    "Any progress?",
+                    "attendedmessage1",
+                ),
+            ).rejects.toThrow("attended-only");
+            // Nothing was delivered, so no turn of the task agent started.
+            expect(fixture.agents.sent).toEqual([]);
+        } finally {
+            await fixture.close();
+        }
+    });
+
     it("messages active tasks and refuses archived ones and self-messages", async () => {
         const fixture = await started("tasks-messages");
         try {
@@ -1816,7 +1837,11 @@ interface AcceptedSender {
 
 async function started(
     name: string,
-    options: { readonly team?: boolean; readonly models?: readonly AgentModel[] } = {},
+    options: {
+        readonly team?: boolean;
+        readonly models?: readonly AgentModel[];
+        readonly attendedOnly?: boolean;
+    } = {},
 ) {
     const configToml = [
         "[providers.scripted]",
@@ -1824,6 +1849,7 @@ async function started(
         "enabled = true",
         "[features]",
         "workspaces = false",
+        ...(options.attendedOnly === true ? ["attended_only = true"] : []),
         ...(options.team === true
             ? [
                   "[feature.team]",

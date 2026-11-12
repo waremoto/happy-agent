@@ -1010,6 +1010,25 @@ describe("BotsModule", () => {
     });
 });
 
+it("refuses an agent messaging another bot on an attended-only installation", async () => {
+    const fixture = await started("bots-attended-message", false, [], true);
+    try {
+        const sender = await fixture.bots.create(fixture.database.context, { name: "Sender" });
+        const target = await fixture.bots.create(fixture.database.context, { name: "Target" });
+        await expect(
+            fixture.bots.sendMessage(
+                fixture.database.context,
+                sender.agentId,
+                target.id,
+                "Wake up",
+                "attendedmessage1",
+            ),
+        ).rejects.toThrow("attended-only");
+    } finally {
+        await fixture.close();
+    }
+});
+
 it("leaves a previously attempted unnamed bot alone", async () => {
     const fixture = await started("bots-old-name-attempt", true);
     try {
@@ -1023,10 +1042,15 @@ it("leaves a previously attempted unnamed bot alone", async () => {
     }
 });
 
-async function started(name: string, workspacesEnabled: boolean, script: ScriptedTurn[] = []) {
+async function started(
+    name: string,
+    workspacesEnabled: boolean,
+    script: ScriptedTurn[] = [],
+    attendedOnly = false,
+) {
     const provider = new ScriptedProvider(script);
     const config = await temporaryTestConfig(
-        `[features]\nworkspaces = ${workspacesEnabled ? "true" : "false"}\n`,
+        `[features]\nworkspaces = ${workspacesEnabled ? "true" : "false"}\n${attendedOnly ? "attended_only = true\n" : ""}`,
         {
             inference: {
                 providers: providersOf(provider),

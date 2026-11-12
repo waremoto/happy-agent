@@ -2206,6 +2206,23 @@ describe("sub-agent harnesses", () => {
         expect(await hooks.beforeTurn!(ctx, scope, TURN)).toBeUndefined();
         expect(values.has("agentOptionsChange")).toBe(false);
     });
+
+    it("offers attended agents no tool to create or message agents, only to stop or archive them", async () => {
+        const toolNames = async (extra: string): Promise<string[]> => {
+            const { hooks, ctx } = await started(
+                new ForeignCollection(),
+                await harnessConfig(extra),
+            );
+            const { scope } = kvScope(ON_HAPPY);
+            return (await hooks.tools!(ctx, scope)).map((tool) => tool.name);
+        };
+        // Control: the same collection offers delegation when the installation is not attended.
+        expect(await toolNames("")).toEqual(
+            expect.arrayContaining(["create_agent", "send_agent_message"]),
+        );
+        const attended = await toolNames("[features]\nattended_only = true");
+        expect(attended).toEqual(["interrupt_agent", "archive_agent"]);
+    });
 });
 
 const PERMISSION_MODES: readonly AgentPermissionMode[] = [
