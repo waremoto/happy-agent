@@ -13,6 +13,7 @@ import {
 } from "../Artifact.js";
 import type { ArtifactsModule } from "../ArtifactsModule.js";
 import { ARTIFACT_TYPE_RULES } from "../ArtifactTypes.js";
+import { ARTIFACT_WRITE_REFUSAL } from "../impl/artifactWriteAccess.js";
 import { LIVE_ARTIFACT_FALLBACK, normalizeArtifactUrl } from "../impl/liveArtifact.js";
 import {
     formatArtifactBackground,
@@ -93,6 +94,7 @@ export function createArtifactTool(
         ].join("\n\n"),
         parameters: createArtifactToolInputSchema,
         returnType: artifactToolResultSchema,
+        ...ARTIFACT_WRITE_REFUSAL,
         durable: true,
         shouldReviewInAutoMode: async (input, ctx) => {
             if (input.url !== undefined) {

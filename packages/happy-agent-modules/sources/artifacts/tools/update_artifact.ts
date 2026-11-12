@@ -11,6 +11,7 @@ import {
 } from "../Artifact.js";
 import type { ArtifactsModule } from "../ArtifactsModule.js";
 import {
+    ARTIFACT_WRITE_REFUSAL,
     describeArtifactWrite,
     requireWritableArtifact,
     shouldReviewArtifactWrite,
@@ -106,6 +107,7 @@ export function updateArtifactTool(
         ].join("\n\n"),
         parameters: updateArtifactToolInputSchema,
         returnType: artifactToolResultSchema,
+        ...ARTIFACT_WRITE_REFUSAL,
         durable: true,
         shouldReviewInAutoMode: async (input, ctx) => {
             const current = await artifacts.get(ctx, input.artifactId);

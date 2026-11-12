@@ -4,6 +4,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { ArtifactInputError, artifactPathSchema } from "../Artifact.js";
 import type { ArtifactsModule } from "../ArtifactsModule.js";
 import {
+    ARTIFACT_WRITE_REFUSAL,
     describeArtifactWrite,
     requireWritableArtifact,
     shouldReviewArtifactWrite,
@@ -58,6 +59,7 @@ export function editArtifactFileTool(artifacts: ArtifactsModule, agentId: string
         returnType: artifactFileWriteResultSchema,
         // The version is keyed by the call, so a call repeated after a restart finds it made
         // instead of applying the edit to text it already changed.
+        ...ARTIFACT_WRITE_REFUSAL,
         durable: true,
         shouldReviewInAutoMode: ({ artifactId }, ctx) =>
             shouldReviewArtifactWrite(ctx, artifacts, agentId, artifactId),

@@ -6,7 +6,7 @@
 // "wait" holds the prompt open until cancelled or steered; "throttled" is refused as too many
 // requests the first time it is sent, and "throttled late" only after reporting a tool call;
 // "over quota" fails with a 429 that names a weekly limit; "stubborn" never ends its first prompt;
-// "ask to write" asks permission to write approval-test.txt and writes it only when allowed;
+// "ask as <title>" asks permission for an action with that title; "ask to write" asks permission to write approval-test.txt and writes it only when allowed;
 // anything else is echoed back.
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -148,6 +148,24 @@ class ScriptedAgent {
             );
             if (typeof steered !== "string") return { stopReason: "cancelled" };
             await this.#say(params.sessionId, `steered:${steered}`);
+            return { stopReason: "end_turn" };
+        }
+        // "ask as <title>" asks permission for an action with that title, as a native agent asks
+        // for a tool of the Happy bridge, and says whether it was allowed.
+        if (text.includes("ask as ")) {
+            const title = text.slice(text.indexOf("ask as ") + 7).trim();
+            const answer = await this.#conn.requestPermission({
+                sessionId: params.sessionId,
+                toolCall: { toolCallId: `bridge-${Date.now()}`, title, rawInput: {} },
+                options: [
+                    { optionId: "allow", name: "Allow", kind: "allow_once" },
+                    { optionId: "reject", name: "Reject", kind: "reject_once" },
+                ],
+            });
+            const allowed =
+                answer.outcome.outcome === "selected" && answer.outcome.optionId === "allow";
+            log({ method: "permission", allowed, title });
+            await this.#say(params.sessionId, allowed ? "allowed" : "refused");
             return { stopReason: "end_turn" };
         }
         if (text.includes("ask to write")) {

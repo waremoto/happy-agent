@@ -59,6 +59,8 @@ const NEW_SESSION_GATE_MS = 60_000;
  * sessions on one account at once — clears within seconds.
  */
 const RATE_LIMIT_RETRY_MS = [3_000, 10_000, 30_000];
+/** How the Claude agent names a tool of the Happy bridge, which it knows as the `happy` server. */
+const HAPPY_BRIDGE_PREFIX = "mcp__happy__";
 const ABORTED = Symbol("acp_aborted");
 const STEERED = Symbol("acp_steered");
 
@@ -836,12 +838,29 @@ export class AcpSession extends BaseSession {
     async #permits(params: acp.RequestPermissionRequest): Promise<boolean> {
         const mode = this.#permissionMode;
         const askPerson = this.#askPerson;
+        // Happy's own mode rule comes first: a bridged Happy tool its mode refuses is refused
+        // here without a question, since allowing it could only be followed by Happy's refusal.
+        // Anything else about a bridged tool is still put to the person, because the server name
+        // in the title is the agent's own claim.
+        if (mode !== undefined && this.#happyRefuses(params, mode)) return false;
         if (askPerson !== undefined && (mode === "read_only" || mode === "workspace_write")) {
             const signal = this.#turnSignal ?? new AbortController().signal;
             if (signal.aborted) return false;
             return await askPerson(acpPermissionQuestion(params), signal).catch(() => false);
         }
         return mode !== "read_only";
+    }
+
+    /** Whether the permission request is for a bridged Happy tool that `mode` refuses outright. */
+    #happyRefuses(params: acp.RequestPermissionRequest, mode: AcpPermissionMode): boolean {
+        const title = params.toolCall.title?.trim();
+        if (title === undefined || !title.startsWith(HAPPY_BRIDGE_PREFIX)) return false;
+        const name = title.slice(HAPPY_BRIDGE_PREFIX.length);
+        return (
+            this.#bridgedTools
+                .find((tool) => tool.name === name)
+                ?.refusedInModes?.includes(mode) === true
+        );
     }
 
     #usage(response: acp.PromptResponse | undefined, outputCharacters: number): SessionUsage {

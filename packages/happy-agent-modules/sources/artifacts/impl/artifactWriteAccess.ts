@@ -1,8 +1,21 @@
-import { agentPermissionMode } from "@slopus/happy-agent-base";
+import { agentPermissionMode, type AgentPermissionMode } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 
 import { ArtifactInputError, ArtifactNotFoundError, type ArtifactRecord } from "../Artifact.js";
 import type { ArtifactsModule } from "../ArtifactsModule.js";
+
+/**
+ * The modes in which every artifact write is refused, whatever the artifact: Read only writes no
+ * artifact. A native agent reaching these tools through the Happy bridge is refused on this
+ * without being asked; `assertArtifactWritable` and `create_artifact` still enforce it.
+ */
+export const ARTIFACT_WRITE_REFUSED_MODES: readonly AgentPermissionMode[] = ["read_only"];
+
+/**
+ * The field the provider reads to refuse in a mode without asking. It sits outside `AgentTool` so
+ * this package type-checks against the released happy-agent-base; the base passes tools through.
+ */
+export const ARTIFACT_WRITE_REFUSAL = { refusedInModes: ARTIFACT_WRITE_REFUSED_MODES };
 
 /** Whether an agent created this artifact itself, and so changes it as freely as its own files. */
 export function isOwnArtifact(artifact: ArtifactRecord, agentId: string): boolean {

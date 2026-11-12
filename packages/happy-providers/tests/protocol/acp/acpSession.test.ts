@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SessionAssistantMessageAccumulator } from "@/core/SessionAssistantMessageAccumulator.js";
 import type { SessionMessage } from "@/core/SessionContext.js";
+import type { SessionTool } from "@/core/SessionTool.js";
 import type { SessionEvent } from "@/core/SessionEvent.js";
 import {
     AcpProvider,
@@ -45,7 +46,12 @@ afterEach(async () => {
 });
 
 function harness(
-    options: { steerable?: boolean; profile?: AcpAgentProfile; askPerson?: AcpAskPerson } = {},
+    options: {
+        steerable?: boolean;
+        profile?: AcpAgentProfile;
+        askPerson?: AcpAskPerson;
+        tools?: SessionTool[];
+    } = {},
 ) {
     const directory = mkdtempSync(join(tmpdir(), "acp-session-"));
     const logPath = join(directory, "agent.jsonl");
@@ -129,7 +135,10 @@ function harness(
             throw new Error("Timed out waiting for expected log entry.");
         },
         async session(): Promise<AcpSession> {
-            const session = await provider.session("agent-1", { instructions: "Be Happy.", tools });
+            const session = await provider.session("agent-1", {
+                instructions: "Be Happy.",
+                tools: options.tools ?? tools,
+            });
             open.push(session);
             return session;
         },
@@ -845,6 +854,88 @@ describe("AcpSession native permission requests", () => {
         expect(text(await h.run(session))).toBe("wrote");
         expect(asks).toBe(0);
     }, 30_000);
+
+    describe("bridged Happy tools", () => {
+        const bridged = [
+            {
+                name: "create_artifact",
+                description: "Creates an artifact.",
+                parameters: Type.Object({}),
+                refusedInModes: ["read_only"] as const,
+            },
+            {
+                name: "list_artifacts",
+                description: "Lists artifacts.",
+                parameters: Type.Object({}),
+            },
+        ];
+
+        it("refuses at once, without asking, a tool Happy refuses in the current mode", async () => {
+            const asked: unknown[] = [];
+            const h = harness({
+                tools: bridged,
+                askPerson: async (question) => {
+                    asked.push(question);
+                    return true;
+                },
+            });
+            h.setPermissionMode("read_only");
+            const session = await h.session();
+            h.user("ask as mcp__happy__create_artifact");
+            expect(text(await h.run(session))).toBe("refused");
+            expect(asked).toEqual([]);
+        }, 30_000);
+
+        it("still asks about a Happy tool its mode does not refuse", async () => {
+            const asked: unknown[] = [];
+            const h = harness({
+                tools: bridged,
+                askPerson: async (question) => {
+                    asked.push(question);
+                    return true;
+                },
+            });
+            h.setPermissionMode("read_only");
+            const session = await h.session();
+            h.user("ask as mcp__happy__list_artifacts");
+            expect(text(await h.run(session))).toBe("allowed");
+            expect(asked).toEqual([
+                expect.objectContaining({ action: "mcp__happy__list_artifacts" }),
+            ]);
+        }, 30_000);
+
+        it("asks about the same refused tool in a mode that does not refuse it", async () => {
+            const asked: unknown[] = [];
+            const h = harness({
+                tools: bridged,
+                askPerson: async (question) => {
+                    asked.push(question);
+                    return true;
+                },
+            });
+            h.setPermissionMode("workspace_write");
+            const session = await h.session();
+            h.user("ask as mcp__happy__create_artifact");
+            expect(text(await h.run(session))).toBe("allowed");
+            expect(asked).toHaveLength(1);
+        }, 30_000);
+
+        it("does not trust a server name it cannot tie to a bridged tool", async () => {
+            const asked: unknown[] = [];
+            const h = harness({
+                tools: bridged,
+                askPerson: async (question) => {
+                    asked.push(question);
+                    return true;
+                },
+            });
+            h.setPermissionMode("read_only");
+            const session = await h.session();
+            h.user("ask as mcp__other__create_artifact");
+            expect(text(await h.run(session))).toBe("allowed");
+            expect(asked).toHaveLength(1);
+        }, 30_000);
+    });
 
     it("keeps the mode's own answer when no person can be asked", async () => {
         const h = harness();

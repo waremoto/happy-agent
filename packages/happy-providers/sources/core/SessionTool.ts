@@ -27,6 +27,12 @@ export interface SessionTool {
     readonly defer?: boolean;
     /** Ignored by providers that do not support grammar-based tools. */
     readonly grammar?: SessionToolLarkGrammar;
+    /**
+     * Permission modes in which the host refuses this tool whatever its arguments. A foreign agent
+     * that reaches the tool through the bridge is then refused at once, without asking a person to
+     * allow what the host would refuse anyway. Absent means the host decides at execution.
+     */
+    readonly refusedInModes?: readonly ("read_only" | "workspace_write" | "auto" | "full_access")[];
 }
 
 export interface SessionToolsOptions {
