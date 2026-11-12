@@ -2204,6 +2204,19 @@ export class ConfigModule implements AgentModule {
     /** Lets Claude Code and Codex ask the person about actions outside their permission mode. */
     useUserInput(userInput: UserInputModule): void {
         this.#userInput = userInput;
+        userInput.setNativeToolQuestionExpiryMs(this.nativeToolQuestionExpiryMs);
+    }
+
+    /**
+     * How long a native agent's permission question stays answerable, from the environment only:
+     * `ORKEST_NATIVE_QUESTION_EXPIRY_SECONDS`, a positive whole number. Ten minutes when unset or
+     * invalid. After it the question counts as denied and a late answer is refused as stale.
+     */
+    get nativeToolQuestionExpiryMs(): number {
+        const text = this.#environmentValue("ORKEST_NATIVE_QUESTION_EXPIRY_SECONDS")?.trim();
+        const seconds =
+            text !== undefined && /^[1-9][0-9]{0,6}$/.test(text) ? Number(text) : undefined;
+        return seconds === undefined ? 10 * 60_000 : seconds * 1_000;
     }
 
     readonly #hooks: AgentModuleHooks = {

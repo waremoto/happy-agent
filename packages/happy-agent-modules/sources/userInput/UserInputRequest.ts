@@ -282,6 +282,8 @@ const userInputAnsweredRequestSchema = Type.Object(
         answer: userInputAnswerSchema,
         answers: Type.Optional(userInputBatchAnswersSchema),
         answeredAt: userInputTimestampSchema,
+        /** The authenticated person who answered, when the daemon knows one. Internal; never projected. */
+        answeredBy: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
     },
     { additionalProperties: false },
 );

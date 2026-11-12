@@ -92,6 +92,10 @@ export const MAX_USER_INPUT_OUTPUT_CHARACTERS = 8_000;
 /** How far up the family tree an agent is looked for before the answer is no. */
 const MAX_USER_INPUT_ANCESTRY_DEPTH = 64;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+/** How long a native agent's permission question waits for its person by default. */
+export const DEFAULT_NATIVE_TOOL_QUESTION_EXPIRY_MS = 10 * 60_000;
+const STALE_NATIVE_TOOL_QUESTION_REASON =
+    "The daemon restarted, so the action this question would have allowed is gone.";
 const ABORTED_TURN_CANCEL_REASON = "The agent run was aborted.";
 
 type UserInputWaitOutcome =
@@ -125,6 +129,10 @@ export class UserInputModule implements AgentModule {
     readonly #listeners = new Set<UserInputEventListener>();
     /** The collection this module runs in, which is where one agent's family tree is known. */
     #agents: AgentSystemRef | undefined;
+    /** How long a native agent's permission question stays answerable. */
+    #nativeToolQuestionExpiryMs = DEFAULT_NATIVE_TOOL_QUESTION_EXPIRY_MS;
+    /** When this process started, so questions an earlier process left behind can be told apart. */
+    #startedAt = 0;
 
     constructor(presence: PresenceModule) {
         this.#store = createSqliteUserInputStorage();
@@ -145,12 +153,67 @@ export class UserInputModule implements AgentModule {
             if (!turn.aborted) return;
             await this.#cancelPendingForAbortedTurn(ctx, scope.agent.id);
         },
+
+        afterStart: async (ctx: Context): Promise<void> => {
+            await this.#withdrawStaleNativeToolQuestions(ctx);
+        },
     };
 
     readonly beforeStart = (_ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
         this.#agents = agents;
+        this.#startedAt = now();
         return this.#hooks;
     };
+
+    /** Sets how long a native agent's permission question stays answerable. */
+    setNativeToolQuestionExpiryMs(milliseconds: number): void {
+        if (!Number.isSafeInteger(milliseconds) || milliseconds < 1) {
+            throw new Error(
+                "The native tool question expiry must be a positive number of milliseconds.",
+            );
+        }
+        this.#nativeToolQuestionExpiryMs = milliseconds;
+    }
+
+    /**
+     * The question a native agent asked in an earlier process belongs to an action that process
+     * was holding, and that action is gone with it. Left pending it would invite an answer that
+     * can no longer run anything, so it is withdrawn now. Only questions older than this process
+     * are touched: one the resumed work asks afterwards is live.
+     */
+    async #withdrawStaleNativeToolQuestions(ctx: Context): Promise<void> {
+        const stale: UserInputRequest[] = [];
+        let cursor: string | undefined;
+        do {
+            const page = await this.#store.listRequests(ctx, "", {
+                status: "pending",
+                limit: MAX_USER_INPUT_PAGE_SIZE,
+                ...(cursor === undefined ? {} : { cursor }),
+            });
+            assertUserInputPage(page);
+            for (const request of page.requests) {
+                if (
+                    request.permissionRequest?.source === "native_tool" &&
+                    request.createdAt <= this.#startedAt
+                ) {
+                    stale.push(request);
+                }
+            }
+            cursor = page.nextCursor;
+        } while (cursor !== undefined);
+        for (const request of stale) {
+            try {
+                await this.cancel(ctx, request.askingAgentId, {
+                    requestId: request.id,
+                    reason: STALE_NATIVE_TOOL_QUESTION_REASON,
+                });
+            } catch (error: unknown) {
+                ctx.log.warn(
+                    `Could not withdraw a permission question left by an earlier process: ${String(error)}`,
+                );
+            }
+        }
+    }
 
     /** Watch every committed question and settlement; call the returned function to stop. */
     onEvent(listener: UserInputEventListener): UserInputUnsubscribe {
@@ -236,7 +299,14 @@ export class UserInputModule implements AgentModule {
     ): Promise<boolean> {
         if (signal.aborted) return false;
         const { input, permissionRequest } = nativeToolPermissionQuestion(permission);
-        const pending = await this.askForPermission(ctx, agentId, input, permissionRequest);
+        // The question expires: once its deadline passes it settles as timed out, which is a
+        // denial, and an answer that arrives later is refused like any other stale answer.
+        const pending = await this.askForPermission(
+            ctx,
+            agentId,
+            { ...input, deadlineAt: now() + this.#nativeToolQuestionExpiryMs },
+            permissionRequest,
+        );
         const withdraw = (): void => {
             this.cancel(ctx, agentId, {
                 requestId: pending.id,
@@ -295,6 +365,7 @@ export class UserInputModule implements AgentModule {
         ctx: Context,
         agentId: string,
         input: UserInputAnswerInput,
+        answeredBy?: string,
     ): Promise<UserInputRequest> {
         this.#assertAgentId(agentId);
         this.#assertInput(userInputAnswerInputUnionSchema, input, "user input answer");
@@ -309,6 +380,22 @@ export class UserInputModule implements AgentModule {
                 throw new UserInputConflictError(structuredClone(current));
             }
             const at = now();
+            // A native agent's question that has outlived its deadline is as stale as a settled one,
+            // even when nothing was waiting to settle it. Nothing is written: the refusal rolls back.
+            const expiredAt = this.#requestDeadline(current);
+            if (
+                current.permissionRequest?.source === "native_tool" &&
+                expiredAt !== undefined &&
+                expiredAt <= at
+            ) {
+                throw new UserInputConflictError(
+                    this.#terminalRequest(
+                        current,
+                        { outcome: "timed_out", deadlineAt: expiredAt, timerDriven: true },
+                        at,
+                    ) as Exclude<UserInputRequest, { status: "pending" }>,
+                );
+            }
             const answeredFields =
                 "answer" in input
                     ? this.#singleAnswerFields(current, input.answer)
@@ -318,6 +405,7 @@ export class UserInputModule implements AgentModule {
                 status: "answered",
                 ...answeredFields,
                 answeredAt: at,
+                ...(answeredBy === undefined ? {} : { answeredBy }),
                 updatedAt: at,
             };
             return await this.#persistTransition(txCtx, agentId, "user_input_answered", answered);

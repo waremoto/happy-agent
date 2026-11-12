@@ -5295,6 +5295,9 @@ export class ApiModule implements AgentModule {
                                               ]),
                                           ),
                                       },
+                                // Who answered, when the daemon authenticated a person: only a team
+                                // member has an identity here; standalone bearer possession has none.
+                                this.#team.enabled ? teamUser(ctx)?.id : undefined,
                             );
                         }),
                 );
