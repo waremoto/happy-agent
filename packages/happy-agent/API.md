@@ -8281,6 +8281,14 @@ Answering is first-write-wins across clients: a second answer — or an answer t
 run already abandoned — is `409` (`conflict`) carrying the question as it now stands, and the
 late client renders the outcome instead. `404` when the ID never existed.
 
+**Who may answer a native tool's permission question.** A question whose `permissionRequest.source`
+is `"native_tool"` asks to run one action in one person's session. In team mode only the owner of
+the agent's task may answer it; a task without an owner is the team owner's; an agent outside any
+task keeps the ordinary rule. Anyone else receives `403` with `code: "forbidden"`, nothing is
+recorded, and the question stays pending for the person it belongs to. The phone's
+`answerQuestion` applies the same rule. The answer records who gave it. In standalone mode the
+installation's one person answers every question.
+
 A secret request accepts exactly one value: the ID of an existing secret whose `availableToAgents`
 is `true`. Anything else is `400` (`invalid_request`) and the question stays pending, so the client
 may correct the answer and retry. Because a person using an older client may have typed a raw value

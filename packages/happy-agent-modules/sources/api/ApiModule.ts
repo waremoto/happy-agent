@@ -322,6 +322,7 @@ import {
     UserInputModule,
     type UserInputEvent,
 } from "../userInput/index.js";
+import { mayAnswerNativeToolQuestion } from "../userInput/impl/nativeToolAnswerer.js";
 import {
     STANDALONE_USER_SETTINGS_OWNER,
     UserSettingsError,
@@ -5258,6 +5259,21 @@ export class ApiModule implements AgentModule {
                             );
                             if (requestRow === undefined) {
                                 throw notFound("The question was not found.");
+                            }
+                            // A native tool's permission question is its task owner's to answer.
+                            if (
+                                this.#team.enabled &&
+                                requestRow.permissionRequest?.source === "native_tool" &&
+                                !mayAnswerNativeToolQuestion(
+                                    teamUser(txCtx),
+                                    await this.#tasks?.forAgent(txCtx, agentId),
+                                )
+                            ) {
+                                throw new ApiError(
+                                    403,
+                                    "forbidden",
+                                    "Only the task's owner may answer this permission question.",
+                                );
                             }
                             if (requestRow.status !== "pending") {
                                 throw new UserInputConflictError(requestRow);
