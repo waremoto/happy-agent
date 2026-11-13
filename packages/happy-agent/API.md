@@ -8285,8 +8285,9 @@ late client renders the outcome instead. `404` when the ID never existed.
 is `"native_tool"` asks to run one action in one person's session. In team mode only the owner of
 the agent's task may answer it; a task without an owner is the team owner's; an agent outside any
 task keeps the ordinary rule. Anyone else receives `403` with `code: "forbidden"`, nothing is
-recorded, and the question stays pending for the person it belongs to. The phone's
-`answerQuestion` applies the same rule. The answer records who gave it. In standalone mode the
+recorded, and the question stays pending for the person it belongs to. The phone applies the same
+rule to `answerQuestion` and to dismissing the question, since a dismissal denies the action. The
+answer records who gave it. In standalone mode the
 installation's one person answers every question.
 
 A secret request accepts exactly one value: the ID of an existing secret whose `availableToAgents`
