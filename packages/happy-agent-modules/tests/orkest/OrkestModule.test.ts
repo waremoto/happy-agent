@@ -206,6 +206,7 @@ async function happy(
     agencyUrl: string,
     attendedOnly: boolean,
     withWorkerToken = false,
+    scriptedProvider = new ScriptedProvider([]),
 ): Promise<HappyAgentRuntime> {
     const home = await mkdtemp(join(inject("orkestFixtureRoot"), "owner-"));
     const tokenFile = join(home, "orkest.token");
@@ -231,7 +232,7 @@ async function happy(
     }
     const providers = new AgentProviders();
     // An empty script: a turn the owner started on its own would fail the test.
-    providers.add("gym", new ScriptedProvider([]), "codex");
+    providers.add("codex", scriptedProvider, "codex");
     const runtime = await startHappyAgentRuntime({
         happyHome,
         environment,
@@ -239,8 +240,8 @@ async function happy(
             providers,
             models: [
                 {
-                    id: "gym/model",
-                    providerId: "gym",
+                    id: "codex-cli/gpt-6.1-sol",
+                    providerId: "codex",
                     name: "Gym",
                     defaultEffort: "medium",
                     effortLevels: ["medium"],
@@ -512,7 +513,8 @@ describe("Orkest attended owner", () => {
         ];
         const send = vi.spyOn(AgentSystemRef.prototype, "send");
         const agency = await fakeAgency(false, {}, [...messages], 1);
-        const runtime = await happy(agency.url, true, true);
+        const provider = new ScriptedProvider([]);
+        const runtime = await happy(agency.url, true, true, provider);
         const agentId = derivedId("a", RUN);
         await expect.poll(() => agency.run.state, { timeout: 20_000 }).toBe("running");
 
@@ -528,14 +530,46 @@ describe("Orkest attended owner", () => {
             workerToken: "worker",
         });
 
+        // The outbox ACK follows durable send-queue acceptance. Wait for the agent to start a
+        // provider turn: that happens after its queue consumer commits the accepted message and
+        // its history projection in the same transaction.
+        const waitForHistoryProjection = async (body: string) => {
+            await expect
+                .poll(
+                    () =>
+                        provider.sessions
+                            .flatMap((session) => session.requests)
+                            .some((request) =>
+                                JSON.stringify(request.context.messages).includes(body),
+                            ),
+                    { timeout: 10_000 },
+                )
+                .toBe(true);
+            return candidateTurns();
+        };
         const history = runtime.modules.history;
         const candidateTurns = async () =>
             (await history.messages(dbCtx(runtime), agentId, {})).filter(
                 (record) => record.message.role === "user",
             );
-        await expect.poll(async () => (await candidateTurns()).length, { timeout: 5_000 }).toBe(1);
-        const first = (await candidateTurns())[0]!.message;
+        const firstTurns = await waitForHistoryProjection(messages[0]!.body);
+        expect(firstTurns).toHaveLength(1);
+        const first = firstTurns[0]!.message;
         expect(first.senderAgentId).toBeUndefined();
+        expect(JSON.stringify(first.blocks)).toContain(messages[0]!.body);
+        const acceptanceAt = async (index: number) => {
+            const result = send.mock.results[index];
+            if (result?.type !== "return") {
+                throw new Error(`Candidate message send ${index + 1} did not return.`);
+            }
+            return await result.value;
+        };
+        const firstId = derivedId("a", `${RUN}:${CANDIDATE_MESSAGE}`);
+        expect(await acceptanceAt(0)).toEqual({
+            id: firstId,
+            delivery: "send",
+            accepted: "created",
+        });
         expect(send).toHaveBeenCalledWith(
             expect.anything(),
             agentId,
@@ -551,8 +585,28 @@ describe("Orkest attended owner", () => {
         // durable message ID is accepted as existing, then the owner can acknowledge it.
         vi.setSystemTime(Date.now() + 31_000);
         await expect.poll(() => acknowledgements().length, { timeout: 10_000 }).toBe(2);
-        await expect.poll(async () => (await candidateTurns()).length, { timeout: 5_000 }).toBe(1);
-        expect((await candidateTurns())[0]!.message.recordId).toBe(first.recordId);
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1]).toEqual([
+            expect.anything(),
+            agentId,
+            {
+                role: "user",
+                content: [{ type: "text", text: messages[0]!.body }],
+            },
+            {
+                id: firstId,
+                metadata: { messageOrigin: "user" },
+            },
+        ]);
+        expect(await acceptanceAt(1)).toEqual({
+            id: firstId,
+            delivery: "send",
+            accepted: "existing",
+        });
+        const retryTurns = await waitForHistoryProjection(messages[0]!.body);
+        expect(retryTurns).toHaveLength(1);
+        expect(retryTurns[0]!.message.recordId).toBe(first.recordId);
+        expect(JSON.stringify(retryTurns[0]!.message.blocks)).toContain(messages[0]!.body);
         expect(acknowledgements()[1]).toMatchObject({
             path: `/internal/agency/runs/${RUN}/candidate-messages/${CANDIDATE_MESSAGE}/delivered`,
             body: { fence: 1 },
@@ -562,9 +616,37 @@ describe("Orkest attended owner", () => {
         vi.setSystemTime(Date.now() + 31_000);
         await expect.poll(() => acknowledgements().length, { timeout: 10_000 }).toBe(3);
         expect(acknowledgements()[2]?.path).toContain("0195f3a0-0000-7000-8000-0000000000ad");
-        await expect.poll(async () => (await candidateTurns()).length, { timeout: 5_000 }).toBe(2);
-        const second = (await candidateTurns())[1]!.message;
-        expect(JSON.stringify(second.blocks)).toContain(messages[1]!.body);
+        expect(send).toHaveBeenCalledTimes(3);
+        expect(send.mock.calls[2]).toEqual([
+            expect.anything(),
+            agentId,
+            {
+                role: "user",
+                content: [{ type: "text", text: messages[1]!.body }],
+            },
+            {
+                id: derivedId("a", `${RUN}:${messages[1]!.messageId}`),
+                metadata: { messageOrigin: "user" },
+            },
+        ]);
+        expect(await acceptanceAt(2)).toEqual({
+            id: derivedId("a", `${RUN}:${messages[1]!.messageId}`),
+            delivery: "send",
+            accepted: "created",
+        });
+        const secondTurns = await waitForHistoryProjection(messages[1]!.body);
+        expect(secondTurns).toHaveLength(2);
+        expect(
+            secondTurns.map((record) => ({
+                role: record.message.role,
+                body: JSON.stringify(record.message.blocks),
+            })),
+        ).toEqual(
+            expect.arrayContaining([
+                { role: "user", body: expect.stringContaining(messages[0]!.body) },
+                { role: "user", body: expect.stringContaining(messages[1]!.body) },
+            ]),
+        );
     }, 60_000);
 
     it.each([
