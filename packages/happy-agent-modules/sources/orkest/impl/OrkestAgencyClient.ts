@@ -31,6 +31,19 @@ export type AttendedSession = Static<typeof attendedSessionSchema>;
 
 const leaseSchema = Type.Object({ status: Type.String(), fenceToken: Type.Number() });
 
+/** One human reply or rejection waiting in Father's owner outbox. */
+const candidateOutboxMessageSchema = Type.Object({
+    messageId: Type.String({ minLength: 1, maxLength: 64 }),
+    candidateId: Type.String({ minLength: 1, maxLength: 64 }),
+    kind: Type.Union([Type.Literal("reply"), Type.Literal("reject")]),
+    body: Type.String({ minLength: 1, maxLength: 4_000 }),
+    author: Type.String({ minLength: 1 }),
+    createdAt: Type.String({ minLength: 1 }),
+    workItem: Type.String({ minLength: 1, maxLength: 300 }),
+    title: Type.String({ minLength: 1, maxLength: 300 }),
+});
+export type CandidateOutboxMessage = Static<typeof candidateOutboxMessageSchema>;
+
 /** An owner call's answer: `final` means the run is no longer this owner's (revoked, stale, gone). */
 export interface AgencyAnswer {
     readonly ok: boolean;
@@ -90,6 +103,34 @@ export class OrkestAgencyClient {
                 fence,
                 leaseSeconds,
             }),
+        );
+    }
+
+    /** Read the owner queue; Father authenticates the holder, with no fence query. */
+    async candidateMessages(runId: string): Promise<CandidateOutboxMessage[]> {
+        const response = await this.#call(
+            "GET",
+            `/internal/agency/runs/${encodeURIComponent(runId)}/candidate-messages`,
+        );
+        const schema = Type.Array(candidateOutboxMessageSchema);
+        if (response.status !== 200 || !Value.Check(schema, response.body)) {
+            throw new Error("Candidate messages unavailable.");
+        }
+        return response.body;
+    }
+
+    /** Mark a queued human message delivered after Happy durably accepts it. */
+    async candidateMessageDelivered(
+        runId: string,
+        messageId: string,
+        fence: number,
+    ): Promise<AgencyAnswer> {
+        return answer(
+            await this.#call(
+                "POST",
+                `/internal/agency/runs/${encodeURIComponent(runId)}/candidate-messages/${encodeURIComponent(messageId)}/delivered`,
+                { fence },
+            ),
         );
     }
 

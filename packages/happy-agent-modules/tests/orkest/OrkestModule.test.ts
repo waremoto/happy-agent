@@ -3,10 +3,10 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { AgentProviders, withAgentDatabase } from "@slopus/happy-agent-base";
+import { AgentProviders, AgentSystemRef, withAgentDatabase } from "@slopus/happy-agent-base";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, inject, it, vi } from "vitest";
 
 import { ConfigModule } from "../../sources/config/index.js";
 import { OrkestAgencyClient, OrkestModule, derivedId } from "../../sources/orkest/index.js";
@@ -21,12 +21,23 @@ import { moduleDatabase } from "../support/moduleDatabase.js";
 const TOKEN = "orkest-test-service-token-0123456789abcdef";
 const RUN = "0195f3a0-0000-7000-8000-000000000001";
 const INTENT = "0195f3a0-0000-7000-8000-0000000000aa";
+const CANDIDATE_MESSAGE = "0195f3a0-0000-7000-8000-0000000000ab";
 const cleanups: Array<() => Promise<void> | void> = [];
 
 afterEach(async () => {
+    vi.useRealTimers();
+    const errors: unknown[] = [];
+    for (const cleanup of cleanups.splice(0).reverse()) {
+        try {
+            await cleanup();
+        } catch (error) {
+            errors.push(error);
+        }
+    }
     vi.unstubAllEnvs();
-    for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
-}, 60_000);
+    vi.restoreAllMocks();
+    if (errors.length) throw new AggregateError(errors, "Orkest fixture cleanup failed");
+}, 180_000);
 
 interface Call {
     method: string;
@@ -39,7 +50,13 @@ interface Call {
  * Father's agency endpoints, in memory: one attended run waiting for its owner. It answers only the
  * right service token and records every call, so the test sees what the owner asked for.
  */
-async function fakeAgency(withAnnotation = false, extra: Record<string, unknown> = {}) {
+async function fakeAgency(
+    withAnnotation = false,
+    extra: Record<string, unknown> = {},
+    candidateMessages: Array<Record<string, unknown>> = [],
+    deliveryFailures = 0,
+    heartbeatStatus = 200,
+) {
     const calls: Call[] = [];
     const run = {
         runId: RUN,
@@ -80,11 +97,31 @@ async function fakeAgency(withAnnotation = false, extra: Record<string, unknown>
         if (path === "/internal/agency/attended/pending") {
             return send(200, intent === "pending" ? [run] : []);
         }
+        if (path === `/internal/agency/runs/${RUN}/candidate-messages`) {
+            if (workerToken !== "worker") return send(403, {});
+            return send(200, candidateMessages);
+        }
+        const delivered = new RegExp(
+            `^/internal/agency/runs/${RUN}/candidate-messages/([^/]+)/delivered$`,
+        ).exec(path);
+        if (delivered) {
+            if (workerToken !== "worker") return send(403, {});
+            if (deliveryFailures > 0) {
+                deliveryFailures -= 1;
+                return send(500, {});
+            }
+            const index = candidateMessages.findIndex(
+                (candidate) => candidate.messageId === delivered[1],
+            );
+            if (index >= 0) candidateMessages.splice(index, 1);
+            return send(200, { status: "Ok" });
+        }
         if (withAnnotation && path.startsWith("/internal/agency/dossiers/")) {
             if (
                 workerToken !== "worker" ||
                 url.searchParams.get("runId") !== RUN ||
-                url.searchParams.get("fence") !== "7"
+                (url.searchParams.get("fence") !== "7" &&
+                    url.searchParams.get("fence") !== String(run.fence))
             )
                 return send(403, {});
             if (path.endsWith("/bot/invites"))
@@ -134,6 +171,10 @@ async function fakeAgency(withAnnotation = false, extra: Record<string, unknown>
                 ? send(200, { status: "Ok" })
                 : send(409, { status: "StaleFence" });
         }
+        if (path === `/internal/agency/runs/${RUN}/heartbeat`) {
+            if (heartbeatStatus !== 200) run.state = "proposed";
+            return send(heartbeatStatus, { status: "Ok" });
+        }
         if (path === `/internal/agency/runs/${RUN}/complete`) {
             run.state = "proposed";
             return send(200, { status: "Ok" });
@@ -161,20 +202,23 @@ async function fakeAgency(withAnnotation = false, extra: Record<string, unknown>
 
 const dbCtx = (runtime: HappyAgentRuntime) => withAgentDatabase(runtime.ctx, runtime.database);
 
-async function happy(agencyUrl: string, attendedOnly: boolean): Promise<HappyAgentRuntime> {
-    const home = await mkdtemp(join(tmpdir(), "happy-orkest-owner-"));
-    cleanups.push(
-        async () =>
-            await rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }),
-    );
+async function happy(
+    agencyUrl: string,
+    attendedOnly: boolean,
+    withWorkerToken = false,
+): Promise<HappyAgentRuntime> {
+    const home = await mkdtemp(join(inject("orkestFixtureRoot"), "owner-"));
     const tokenFile = join(home, "orkest.token");
     await writeFile(tokenFile, TOKEN);
+    const workerTokenFile = join(home, "orkest-worker.token");
+    if (withWorkerToken) await writeFile(workerTokenFile, "worker");
     const environment = {
         ...process.env,
         HOME: home,
         USERPROFILE: home,
         ORKEST_AGENCY_URL: agencyUrl,
         ORKEST_AGENCY_TOKEN_FILE: tokenFile,
+        ...(withWorkerToken ? { ORKEST_WORKER_TOKEN_FILE: workerTokenFile } : {}),
         ORKEST_WORKER_ID: "happy:test",
     };
     vi.stubEnv("HOME", home);
@@ -205,6 +249,7 @@ async function happy(agencyUrl: string, attendedOnly: boolean): Promise<HappyAge
         },
     });
     cleanups.push(async () => await runtime.close());
+    cleanups.push(async () => await runtime.modules.orkest.close());
     return runtime;
 }
 
@@ -404,6 +449,170 @@ describe("Orkest attended owner", () => {
             body: input,
         });
     });
+
+    it("reads and acknowledges Father's candidate-message outbox with the worker token", async () => {
+        const message = {
+            messageId: CANDIDATE_MESSAGE,
+            candidateId: "0195f3a0-0000-7000-8000-0000000000ac",
+            kind: "reply",
+            body: "Please include the expiry boundary case.",
+            author: "human-1",
+            createdAt: "2026-11-17T12:00:00Z",
+            workItem: "WAR-7",
+            title: "Tighten the login check",
+        };
+        const agency = await fakeAgency(false, {}, [message]);
+        const client = new OrkestAgencyClient({
+            url: agency.url,
+            token: TOKEN,
+            workerId: "test",
+            workerToken: "worker",
+        });
+
+        expect(await client.candidateMessages(RUN)).toEqual([message]);
+        await client.candidateMessageDelivered(RUN, CANDIDATE_MESSAGE, 7);
+        expect(agency.calls).toMatchObject([
+            {
+                method: "GET",
+                path: `/internal/agency/runs/${RUN}/candidate-messages`,
+                body: null,
+                workerToken: "worker",
+            },
+            {
+                method: "POST",
+                path: `/internal/agency/runs/${RUN}/candidate-messages/${CANDIDATE_MESSAGE}/delivered`,
+                body: { fence: 7 },
+                workerToken: "worker",
+            },
+        ]);
+    });
+
+    it("queues one human candidate message at a time and retries a failed acknowledgement with its stable identity", async () => {
+        const messages = [
+            {
+                messageId: CANDIDATE_MESSAGE,
+                candidateId: "0195f3a0-0000-7000-8000-0000000000ac",
+                kind: "reply",
+                body: "Please include the expiry boundary case.",
+                author: "human-1",
+                createdAt: "2026-11-17T12:00:00Z",
+                workItem: "WAR-7",
+                title: "Tighten the login check",
+            },
+            {
+                messageId: "0195f3a0-0000-7000-8000-0000000000ad",
+                candidateId: "0195f3a0-0000-7000-8000-0000000000ae",
+                kind: "reject",
+                body: "This proposal changes more than the agreed scope.",
+                author: "human-2",
+                createdAt: "2026-11-17T12:01:00Z",
+                workItem: "WAR-8",
+                title: "Limit the session refresh",
+            },
+        ];
+        const send = vi.spyOn(AgentSystemRef.prototype, "send");
+        const agency = await fakeAgency(false, {}, [...messages], 1);
+        const runtime = await happy(agency.url, true, true);
+        const agentId = derivedId("a", RUN);
+        await expect.poll(() => agency.run.state, { timeout: 20_000 }).toBe("running");
+
+        // Expire the initial heartbeat interval so the owner reads the candidate outbox.
+        vi.setSystemTime(Date.now() + 31_000);
+        const acknowledgements = () =>
+            agency.calls.filter((call) => call.path.endsWith("/delivered"));
+        await expect.poll(() => acknowledgements().length, { timeout: 10_000 }).toBe(1);
+        expect(acknowledgements()[0]).toMatchObject({
+            method: "POST",
+            path: `/internal/agency/runs/${RUN}/candidate-messages/${CANDIDATE_MESSAGE}/delivered`,
+            body: { fence: 1 },
+            workerToken: "worker",
+        });
+
+        const history = runtime.modules.history;
+        const candidateTurns = async () =>
+            (await history.messages(dbCtx(runtime), agentId, {})).filter(
+                (record) => record.message.role === "user",
+            );
+        await expect.poll(async () => (await candidateTurns()).length, { timeout: 5_000 }).toBe(1);
+        const first = (await candidateTurns())[0]!.message;
+        expect(first.senderAgentId).toBeUndefined();
+        expect(send).toHaveBeenCalledWith(
+            expect.anything(),
+            agentId,
+            { role: "user", content: [{ type: "text", text: messages[0]!.body }] },
+            {
+                id: derivedId("a", `${RUN}:${CANDIDATE_MESSAGE}`),
+                metadata: { messageOrigin: "user" },
+            },
+        );
+        expect(JSON.stringify(first.blocks)).toContain(messages[0]!.body);
+
+        // The failed acknowledgement left the item pending. On the next heartbeat, the same
+        // durable message ID is accepted as existing, then the owner can acknowledge it.
+        vi.setSystemTime(Date.now() + 31_000);
+        await expect.poll(() => acknowledgements().length, { timeout: 10_000 }).toBe(2);
+        await expect.poll(async () => (await candidateTurns()).length, { timeout: 5_000 }).toBe(1);
+        expect((await candidateTurns())[0]!.message.recordId).toBe(first.recordId);
+        expect(acknowledgements()[1]).toMatchObject({
+            path: `/internal/agency/runs/${RUN}/candidate-messages/${CANDIDATE_MESSAGE}/delivered`,
+            body: { fence: 1 },
+        });
+
+        // A later heartbeat delivers the second item; the batch is serialized and bounded to one.
+        vi.setSystemTime(Date.now() + 31_000);
+        await expect.poll(() => acknowledgements().length, { timeout: 10_000 }).toBe(3);
+        expect(acknowledgements()[2]?.path).toContain("0195f3a0-0000-7000-8000-0000000000ad");
+        await expect.poll(async () => (await candidateTurns()).length, { timeout: 5_000 }).toBe(2);
+        const second = (await candidateTurns())[1]!.message;
+        expect(JSON.stringify(second.blocks)).toContain(messages[1]!.body);
+    }, 60_000);
+
+    it.each([
+        { scenario: "missing worker token", token: false, status: 200, rejectSend: false },
+        { scenario: "lost lease", token: true, status: 409, rejectSend: false },
+        { scenario: "failed enqueue", token: true, status: 200, rejectSend: true },
+    ])(
+        "does not acknowledge on $scenario",
+        async ({ token, status, rejectSend }) => {
+            const agency = await fakeAgency(
+                false,
+                {},
+                [
+                    {
+                        messageId: CANDIDATE_MESSAGE,
+                        candidateId: INTENT,
+                        kind: "reply",
+                        body: "Please wait.",
+                        title: "Review",
+                        workItem: "WAR-7",
+                        author: "human",
+                        createdAt: "2026-11-17T12:00:00Z",
+                    },
+                ],
+                0,
+                status,
+            );
+            await happy(agency.url, true, token);
+            await expect.poll(() => agency.run.state, { timeout: 20_000 }).toBe("running");
+            const send = vi.spyOn(AgentSystemRef.prototype, "send");
+            if (rejectSend) send.mockRejectedValue(new Error("queue unavailable"));
+            vi.setSystemTime(Date.now() + 31_000);
+            await expect
+                .poll(() => agency.calls.some((c) => c.path.endsWith("/heartbeat")), {
+                    timeout: 10_000,
+                })
+                .toBe(true);
+            if (rejectSend)
+                await expect.poll(() => send.mock.calls.length, { timeout: 10_000 }).toBe(1);
+            await delay(250);
+            expect(agency.calls.some((c) => c.path.endsWith("/candidate-messages"))).toBe(
+                rejectSend,
+            );
+            expect(agency.calls.some((c) => c.path.endsWith("/delivered"))).toBe(false);
+            if (!rejectSend) expect(send).not.toHaveBeenCalled();
+        },
+        60_000,
+    );
 
     it("reports the Claude session its conversation runs in, again when Happy replaces it, and nothing else", async () => {
         const agency = await fakeAgency();

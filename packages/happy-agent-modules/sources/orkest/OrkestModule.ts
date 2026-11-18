@@ -11,7 +11,11 @@ import {
 import type { MessageMode } from "@slopus/happy-agent-client";
 import { delay, detach, isAbortedError, withLifetime, type Context } from "@steve.kite/stdlib";
 
-import { AGENT_MESSAGE_ORIGIN_METADATA, senderAgentIdMetadata } from "../impl/messageOrigin.js";
+import {
+    AGENT_MESSAGE_ORIGIN_METADATA,
+    USER_MESSAGE_ORIGIN_METADATA,
+    senderAgentIdMetadata,
+} from "../impl/messageOrigin.js";
 import { ConfigModule } from "../config/index.js";
 import { TasksModule } from "../tasks/index.js";
 import {
@@ -219,6 +223,46 @@ export class OrkestModule implements AgentModule {
                             error instanceof Error
                                 ? error.message
                                 : "Dossier invitation unavailable.";
+                    }
+                    try {
+                        // Deliver at most one outbox item per heartbeat so a backlog cannot hold
+                        // up lease renewal. A failed send or ack leaves this same ID for retry.
+                        const [message] = await agency.candidateMessages(open.runId);
+                        if (message !== undefined) {
+                            const acceptance = await this.#agents.send(
+                                ctx,
+                                open.agentId,
+                                {
+                                    role: "user",
+                                    content: [
+                                        {
+                                            type: "text",
+                                            text: message.body,
+                                        },
+                                    ],
+                                },
+                                {
+                                    id: derivedId("a", `${open.runId}:${message.messageId}`),
+                                    metadata: USER_MESSAGE_ORIGIN_METADATA,
+                                },
+                            );
+                            if (
+                                acceptance.accepted !== "created" &&
+                                acceptance.accepted !== "existing"
+                            ) {
+                                throw new Error("Candidate message was not accepted.");
+                            }
+                            const delivered = await agency.candidateMessageDelivered(
+                                open.runId,
+                                message.messageId,
+                                open.fence,
+                            );
+                            if (!delivered.ok)
+                                throw new Error("Candidate message acknowledgement was refused.");
+                        }
+                    } catch {
+                        // Do not include the human message, credentials, or response body in diagnostics.
+                        this.#lastError = "Candidate message delivery unavailable.";
                     }
                 }
             }
