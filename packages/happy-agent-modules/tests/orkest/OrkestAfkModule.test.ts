@@ -120,7 +120,8 @@ async function fakeAfkAgency(options: { autoAnswer?: "approved" | "denied" } = {
             response.writeHead(status, { "Content-Type": "application/json" });
             response.end(JSON.stringify(value));
         };
-        if (header("x-ghost-service-token") !== SERVICE_TOKEN) return send(401, {});
+        // GHO-189: the worker holds only its own token; a call that carries Father's service token is refused.
+        if (header("x-ghost-service-token") !== undefined) return send(401, {});
         if (header("x-orkest-worker-token") !== WORKER_TOKEN) return send(401, {});
         const path = url.pathname;
         const fenced = () => (body as { fence?: number } | null)?.fence === run.fence;
@@ -238,8 +239,6 @@ async function afkInstallation(
     options: { attendedOnly?: boolean; extra?: Record<string, string> } = {},
 ): Promise<Installation> {
     const home = await mkdtemp(join(inject("orkestFixtureRoot"), "afk-"));
-    const tokenFile = join(home, "orkest-afk.token");
-    await writeFile(tokenFile, SERVICE_TOKEN);
     const workerTokenFile = join(home, "orkest-afk-worker.token");
     await writeFile(workerTokenFile, `${WORKER_TOKEN}\n`);
     const environment = {
@@ -247,7 +246,6 @@ async function afkInstallation(
         HOME: home,
         USERPROFILE: home,
         ORKEST_AFK_URL: agencyUrl,
-        ORKEST_AFK_TOKEN_FILE: tokenFile,
         ORKEST_AFK_WORKER_TOKEN_FILE: workerTokenFile,
         ORKEST_AFK_WORKER_ID: "happy-afk:test",
         ORKEST_AFK_MODEL: `scripted:${MODEL}`,
@@ -421,10 +419,10 @@ describe("Orkest AFK owner (GHO-189.3.1)", () => {
         expect(agency.completes()).toEqual([
             { fence: 1, proposed: true, consumed: 1, reason: "done" },
         ]);
-        // Every call carried both the service token and this worker's own token.
+        // Every call carried this worker's own token and never Father's service token.
         expect(agency.calls.length).toBeGreaterThan(5);
         for (const call of agency.calls) {
-            expect(call.serviceToken).toBe(SERVICE_TOKEN);
+            expect(call.serviceToken).toBeUndefined();
             expect(call.workerToken).toBe(WORKER_TOKEN);
         }
     }, 90_000);
@@ -531,11 +529,17 @@ describe("Orkest AFK owner (GHO-189.3.1)", () => {
         const on = (await testConfigRootedAt(root, settings)).orkestAfk;
         expect(on).toMatchObject({
             url: "http://127.0.0.1:9",
-            token: SERVICE_TOKEN,
             workerToken: WORKER_TOKEN,
             model: `scripted:${MODEL}`,
         });
         expect(on?.workerId).toMatch(/^happy-afk:/);
+        // A stale launcher's service-token file is never read: the worker holds only its own token.
+        expect(on).not.toHaveProperty("token");
+        expect(JSON.stringify(on)).not.toContain(SERVICE_TOKEN);
+        vi.stubEnv("ORKEST_AFK_TOKEN_FILE", "");
+        expect((await testConfigRootedAt(root, settings)).orkestAfk).toMatchObject({
+            workerToken: WORKER_TOKEN,
+        });
 
         vi.stubEnv("ORKEST_AFK_WORKER_TOKEN_FILE", "");
         expect((await testConfigRootedAt(root, settings)).orkestAfk).toBeUndefined();
