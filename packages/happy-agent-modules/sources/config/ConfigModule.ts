@@ -3710,9 +3710,9 @@ export class ConfigModule implements AgentModule {
 
     /**
      * The Orkest AFK lane this installation works unattended runs for (GHO-189.3), from the
-     * environment only: `ORKEST_AFK_URL` (the Father base URL), `ORKEST_AFK_TOKEN_FILE` (the Father
-     * service token), `ORKEST_AFK_WORKER_TOKEN_FILE` (this worker's own Orkest token, required: the
-     * AFK lane refuses tokenless calls) and `ORKEST_AFK_MODEL` (`<providerId>:<modelId>`, or a
+     * environment only: `ORKEST_AFK_URL` (the Father base URL), `ORKEST_AFK_WORKER_TOKEN_FILE` (this
+     * worker's own Orkest token, its only credential: Father's gate lets it through on the owner lane
+     * alone, and the worker never holds Father's service token, so `ORKEST_AFK_TOKEN_FILE` is not read) and `ORKEST_AFK_MODEL` (`<providerId>:<modelId>`, or a
      * model id the catalog knows). Optional `ORKEST_AFK_WORKER_ID` (default `happy-afk:<host>`),
      * `ORKEST_AFK_WORK_ROOT` and `ORKEST_AFK_REPO`. A named token file that is unreadable or empty
      * turns the lane off; there is no fallback. Tokens are read here and never logged or exposed.
@@ -3720,10 +3720,9 @@ export class ConfigModule implements AgentModule {
     get orkestAfk(): OrkestAfkEndpoint | undefined {
         const value = (name: string) => this.#environmentValue(name)?.trim() || undefined;
         const url = value("ORKEST_AFK_URL");
-        const tokenFile = value("ORKEST_AFK_TOKEN_FILE");
         const workerTokenFile = value("ORKEST_AFK_WORKER_TOKEN_FILE");
         const model = value("ORKEST_AFK_MODEL");
-        if (!url || !tokenFile || !workerTokenFile || !model) return undefined;
+        if (!url || !workerTokenFile || !model) return undefined;
         if (url.length > MAX_CONFIG_STRING_LENGTH || model.length > MAX_CONFIG_STRING_LENGTH) {
             return undefined;
         }
@@ -3734,14 +3733,12 @@ export class ConfigModule implements AgentModule {
                 return "";
             }
         };
-        const token = read(tokenFile);
         const workerToken = read(workerTokenFile);
-        if (token.length === 0 || workerToken.length === 0) return undefined;
+        if (workerToken.length === 0) return undefined;
         const workRoot = value("ORKEST_AFK_WORK_ROOT");
         const repo = value("ORKEST_AFK_REPO");
         return {
             url: url.replace(/\/+$/, ""),
-            token,
             workerToken,
             workerId: value("ORKEST_AFK_WORKER_ID") ?? `happy-afk:${hostname()}`,
             model,

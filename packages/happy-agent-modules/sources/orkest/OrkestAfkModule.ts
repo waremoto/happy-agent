@@ -153,7 +153,7 @@ interface HeldRun {
  * endpoint and waits for the answer. When the loop settles the module publishes a receipt and
  * completes the run as proposed; a denial, a stop request or a failure completes it accordingly.
  *
- * Enabled only with `ORKEST_AFK_URL`, `ORKEST_AFK_TOKEN_FILE`, `ORKEST_AFK_WORKER_TOKEN_FILE` and
+ * Enabled only with `ORKEST_AFK_URL`, `ORKEST_AFK_WORKER_TOKEN_FILE` and
  * `ORKEST_AFK_MODEL`, and only on an attended-only installation: Orkest's queue is the scheduler.
  */
 export class OrkestAfkModule implements AgentModule {

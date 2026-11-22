@@ -4,13 +4,12 @@ import { Value } from "@sinclair/typebox/value";
 import type { AgencyAnswer } from "./OrkestAgencyClient.js";
 
 /**
- * Where the unattended (AFK) lane of Father's agency API lives and who this worker is. Both
- * tokens travel on every call: the Father service token, and this worker's own Orkest token,
- * without which the AFK lane refuses the call.
+ * Where the unattended (AFK) lane of Father's agency API lives and who this worker is. Only this
+ * worker's own Orkest token travels: Father's gate lets it through on the owner lane alone, so the
+ * worker never holds Father's service token and cannot reach a person's routes (GHO-189).
  */
 export interface OrkestAfkEndpoint {
     readonly url: string;
-    readonly token: string;
     readonly workerToken: string;
     readonly workerId: string;
     /** `ORKEST_AFK_MODEL` as written: `<providerId>:<modelId>`, or a model id the catalog knows. */
@@ -199,7 +198,6 @@ export class OrkestAfkClient {
         const response = await fetch(`${this.#endpoint.url}${path}`, {
             method,
             headers: {
-                "X-Ghost-Service-Token": this.#endpoint.token,
                 "X-Orkest-Worker-Token": this.#endpoint.workerToken,
                 ...(body === undefined ? {} : { "Content-Type": "application/json" }),
             },
