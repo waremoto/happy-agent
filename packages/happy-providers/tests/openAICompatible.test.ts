@@ -252,6 +252,48 @@ describe("OpenAI-compatible Chat Completions provider", () => {
         }
     });
 
+    it("accepts chunks that leave finish_reason out until the last one, as the Ghost gateway streams", async () => {
+        const omitted = (delta: object) => ({ choices: [{ index: 0, delta }] });
+        const transport = mockTransport(() =>
+            sse([
+                omitted({ role: "assistant", content: "", reasoning_content: "Find the file." }),
+                omitted({
+                    tool_calls: [
+                        {
+                            index: 0,
+                            id: "call_1",
+                            type: "function",
+                            function: { name: "Read", arguments: "" },
+                        },
+                    ],
+                }),
+                omitted({
+                    tool_calls: [{ index: 0, function: { arguments: '{"file_path":"a.ts"}' } }],
+                }),
+                chunk({}, "tool_calls"),
+                usage(),
+            ]),
+        );
+        const session = await provider(transport.fetch).session("tools", {
+            instructions: context.instructions,
+            tools,
+        });
+        try {
+            const events = await collect(session.run(testContext, { context }));
+            expect(events.at(-1)).toMatchObject({ type: "done", state: "tool_call" });
+            expect(
+                assistantMessageFromEvents(committedSessionEvents(events))!.content,
+            ).toContainEqual({
+                type: "tool_call",
+                callId: "call_1",
+                name: "Read",
+                arguments: '{"file_path":"a.ts"}',
+            });
+        } finally {
+            session.destroy();
+        }
+    });
+
     it("leaves reasoning off the wire unless a replay field is configured", async () => {
         const transport = mockTransport(() => answer());
         const session = await provider(transport.fetch).session("no-replay", { instructions: "" });
