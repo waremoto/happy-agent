@@ -7,8 +7,11 @@ import { promisify } from "node:util";
 
 import {
     withAgentDatabase,
+    type AgentBaseToolCall,
+    type AgentBaseToolCallDecision,
     type AgentModule,
     type AgentModuleHooks,
+    type AgentModuleScope,
     type AgentSystemRef,
 } from "@slopus/happy-agent-base";
 import type { MessageMode } from "@slopus/happy-agent-client";
@@ -24,6 +27,7 @@ import { USER_MESSAGE_ORIGIN_METADATA } from "../impl/messageOrigin.js";
 import { TasksModule, type TaskRecord } from "../tasks/index.js";
 import {
     OrkestAfkClient,
+    type AfkApproval,
     type AfkCompletion,
     type AfkRun,
     type OrkestAfkEndpoint,
@@ -31,6 +35,7 @@ import {
 
 /** How often the owner reads Orkest, and how often a waiting call re-reads its approval. */
 const POLL_MS = 2_000;
+const APPROVAL_POLL_MS = 2_000;
 /** The lease asked for at each claim and heartbeat, and how often it is renewed. */
 const LEASE_SECONDS = 120;
 const HEARTBEAT_MS = 30_000;
@@ -39,6 +44,23 @@ const PROGRESS_MS = 5_000;
 /** A declined run whose model keeps going is ended anyway after this long. */
 const DECLINE_GRACE_MS = 60_000;
 const SUMMARY_LIMIT = 4_000;
+const PREVIEW_LIMIT = 4_000;
+
+/**
+ * Tools that only read the run's work directory, run without asking. The names are each vendor's
+ * own (Claude/Kimi `Read`, `Glob`, `Grep`, `ReadMediaFile`; Grok `read_file`, `list_dir`, `grep`;
+ * Codex `view_image`). Everything else, shells included, waits for a person's approval.
+ */
+export const AFK_READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
+    "Read",
+    "Glob",
+    "Grep",
+    "ReadMediaFile",
+    "read_file",
+    "list_dir",
+    "grep",
+    "view_image",
+]);
 
 const execFileAsync = promisify(execFile);
 
@@ -114,6 +136,7 @@ export class OrkestAfkModule implements AgentModule {
     readonly beforeStart = (ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
         this.#agents = agents;
         return {
+            beforeToolCall: (hookCtx, scope, call) => this.#beforeToolCall(hookCtx, scope, call),
             onEvent: (_hookCtx, scope, event) => this.#observe(scope.agent.id, event),
             afterTurn: (_hookCtx, scope) => {
                 const held = this.#byAgent(scope.agent.id);
@@ -247,6 +270,10 @@ export class OrkestAfkModule implements AgentModule {
                 this.#held.get(run.runId) ??
                 (await this.#reclaim(ctx, client, endpoint, mode, run));
             if (held === undefined || held.ending !== undefined) continue;
+            if (run.stopRequestedAt !== null) {
+                held.stopRequested = true;
+                await this.#end(held, "stopped");
+            }
         }
         for (const run of await client.pending()) {
             if (this.#stop.signal.aborted) return;
@@ -444,6 +471,129 @@ export class OrkestAfkModule implements AgentModule {
         return acceptance.accepted;
     }
 
+    // ---- tool policy ----------------------------------------------------------------------
+
+    async #beforeToolCall(
+        ctx: Context,
+        scope: AgentModuleScope,
+        call: AgentBaseToolCall,
+    ): Promise<AgentBaseToolCallDecision | undefined> {
+        const held = this.#byAgent(scope.agent.id);
+        if (held === undefined) return await this.#unheld(ctx, scope.agent.id);
+        const tool = call.tool.name;
+        const inputSha256 = createHash("sha256").update(stableJson(call.arguments)).digest("hex");
+        if (held.ending !== undefined || held.lost || held.stopRequested) {
+            return refusal("This Orkest run has ended; the action did not run. Stop.");
+        }
+        if (held.declinedAt !== undefined) {
+            return refusal(
+                "A person already declined an action in this run; nothing else runs. Stop.",
+            );
+        }
+        if (AFK_READ_ONLY_TOOLS.has(tool)) {
+            held.toolCalls.push({ tool, inputSha256, decision: "ran" });
+            await this.#progress(held, `Running: ${tool}`);
+            return { type: "run" };
+        }
+        const client = this.#client;
+        if (client === undefined)
+            return refusal("The Orkest owner is not running; the action did not run.");
+        const key = `${tool}:${inputSha256.slice(0, 32)}`;
+        let summary = `Run ${tool}`;
+        try {
+            const described = call.tool.describeAutoPermissionAction?.(
+                call.arguments as never,
+                ctx,
+            );
+            if (typeof described === "string" && described.trim().length > 0)
+                summary = described.slice(0, 500);
+        } catch {
+            // The plain summary stands.
+        }
+        let approval = await client.requestApproval(held.runId, held.fence, {
+            key,
+            tool,
+            summary,
+            reason: "An unattended Orkest run needs a person's approval for every action beyond reading files.",
+            inputSha256,
+            inputPreview: stableJson(call.arguments).slice(0, PREVIEW_LIMIT),
+        });
+        if (approval === undefined) {
+            return refusal(
+                "This Orkest run is no longer held by this worker; the action did not run. Stop.",
+            );
+        }
+        if (approval.state === "pending") {
+            await this.#progress(held, `Waiting for approval: ${tool}`, true);
+            approval = await this.#awaitAnswer(ctx, client, held, key);
+            if (approval === undefined) {
+                return refusal(
+                    "The run stopped before a person answered; the action did not run. Stop.",
+                );
+            }
+        }
+        held.approvals.set(key, {
+            key,
+            tool,
+            state: approval.state,
+            answeredBy: approval.answeredBy ?? null,
+        });
+        if (approval.state === "approved") {
+            held.toolCalls.push({ tool, inputSha256, decision: "approved" });
+            await this.#progress(held, `Approved: ${tool}`, true);
+            return { type: "run" };
+        }
+        held.toolCalls.push({ tool, inputSha256, decision: "denied" });
+        // The model reads the refusal; the run ends declined once its loop settles.
+        held.declinedAt = Date.now();
+        await this.#progress(held, `Declined: ${tool}`, true);
+        return refusal(
+            "A person declined this action in Orkest, so it did not run. Do not retry it or work around it. Stop.",
+        );
+    }
+
+    async #awaitAnswer(
+        ctx: Context,
+        client: OrkestAfkClient,
+        held: HeldRun,
+        key: string,
+    ): Promise<AfkApproval | undefined> {
+        const lifetime =
+            ctx.lifetime === undefined
+                ? this.#stop.signal
+                : AbortSignal.any([ctx.lifetime, this.#stop.signal]);
+        const waitCtx = withLifetime(ctx, lifetime);
+        for (;;) {
+            if (held.lost || held.stopRequested || held.ending !== undefined || lifetime.aborted) {
+                return undefined;
+            }
+            await delay(waitCtx, APPROVAL_POLL_MS);
+            if (held.lost || held.stopRequested || held.ending !== undefined) return undefined;
+            let approval: AfkApproval | undefined;
+            try {
+                approval = await client.approval(held.runId, key);
+            } catch (error) {
+                if (isAbortedError(error) || lifetime.aborted) throw error;
+                continue;
+            }
+            if (approval === undefined) return undefined;
+            if (approval.state !== "pending") return approval;
+        }
+    }
+
+    /** A call from an AFK task this worker does not hold (yet) never runs. */
+    async #unheld(ctx: Context, agentId: string): Promise<AgentBaseToolCallDecision | undefined> {
+        if (this.#status !== "running") return undefined;
+        let task: TaskRecord | undefined;
+        try {
+            task = await this.#tasks.forAgent(ctx, agentId);
+        } catch {
+            return undefined;
+        }
+        if (task === undefined || !task.folderName.startsWith(AFK_FOLDER_PREFIX)) return undefined;
+        return refusal("This Orkest run is not held by this worker; the action did not run. Stop.");
+    }
+
     // ---- ending ---------------------------------------------------------------------------
 
     /** Receipt first, then completion. Idempotent per run; a failure is retried by a later call. */
@@ -558,6 +708,10 @@ export class OrkestAfkModule implements AgentModule {
 }
 
 const AFK_FOLDER_PREFIX = "orkest_afk_";
+
+function refusal(text: string): AgentBaseToolCallDecision {
+    return { type: "answer", content: [{ type: "text", text }], isError: true };
+}
 
 /** JSON with object keys sorted, so the same arguments always hash the same. */
 export function stableJson(value: unknown): string {
