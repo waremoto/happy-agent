@@ -46,6 +46,7 @@ import type { UserInputModule } from "../userInput/index.js";
 import { getManagedProjectsDirectory } from "../impl/managedProjectsDirectory.js";
 import { getManagedWorkspacesDirectory } from "../impl/managedWorkspacesDirectory.js";
 import { isUserOriginMetadata } from "../impl/messageOrigin.js";
+import type { OrkestAfkEndpoint } from "../orkest/impl/OrkestAfkClient.js";
 import {
     agentModelCatalog,
     agentModelContext,
@@ -3705,6 +3706,13 @@ export class ConfigModule implements AgentModule {
         }
         if (workerToken.length === 0) return undefined;
         return { url: url.replace(/\/+$/, ""), token, workerId, workerToken };
+    }
+
+    /**
+     * The Orkest AFK lane this installation works unattended runs for (GHO-189.3). Not wired yet.
+     */
+    get orkestAfk(): OrkestAfkEndpoint | undefined {
+        return undefined;
     }
 
     /**
