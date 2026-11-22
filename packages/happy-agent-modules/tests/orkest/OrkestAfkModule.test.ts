@@ -561,4 +561,183 @@ function inputSha256(value: unknown): string {
         .update(JSON.stringify(stable(value)))
         .digest("hex");
 }
-void inputSha256;
+
+/** A runtime whose scripted model calls Write in the run's work directory, then finishes. */
+async function gatedRun(
+    installation: Installation,
+    after: ScriptedTurn[] = [textTurn("Created hello.txt.")],
+) {
+    let started!: (runtime: HappyAgentRuntime) => void;
+    const ready = new Promise<HappyAgentRuntime>((resolve) => (started = resolve));
+    const workDir = workDirOf(ready);
+    const provider = new ScriptedProvider([writeHello(workDir), ...after]);
+    const runtime = await afkHappy(installation, provider);
+    started(runtime);
+    return { runtime, provider, workDir: await workDir };
+}
+
+const writeKey = (path: string) =>
+    `Write:${inputSha256({ file_path: path, content: "hello" }).slice(0, 32)}`;
+
+describe("Orkest AFK tool policy (GHO-189.3.2)", () => {
+    it("runs a read-only tool without asking anyone", async () => {
+        const agency = await fakeAfkAgency();
+        const installation = await afkInstallation(agency.url);
+        await afkHappy(
+            installation,
+            new ScriptedProvider([
+                toolCallTurn("callglob1", "Glob", JSON.stringify({ pattern: "*" })),
+                textTurn("Listed the folder."),
+            ]),
+        );
+        await expect.poll(() => agency.run.state, { timeout: 30_000 }).toBe("proposed");
+        expect(agency.calls.filter((c) => c.path.includes("/approvals"))).toHaveLength(0);
+        expect(agency.receipts()[0]).toMatchObject({
+            outcome: "proposed",
+            toolCalls: [
+                { tool: "Glob", inputSha256: inputSha256({ pattern: "*" }), decision: "ran" },
+            ],
+            approvals: [],
+        });
+    }, 90_000);
+
+    it("asks before a gated call, waits, and runs it once a person approves", async () => {
+        const agency = await fakeAfkAgency();
+        const installation = await afkInstallation(agency.url);
+        const { workDir } = await gatedRun(installation);
+        const hello = join(workDir, "hello.txt");
+
+        await expect.poll(() => agency.approvals.size, { timeout: 30_000 }).toBe(1);
+        const [row] = [...agency.approvals.values()];
+        expect(row).toMatchObject({ tool: "Write", key: writeKey(hello), state: "pending" });
+        expect(row!.inputSha256).toMatch(/^[0-9a-f]{64}$/);
+        expect(row!.inputSha256).toBe(inputSha256({ file_path: hello, content: "hello" }));
+        expect(row!.inputPreview.length).toBeLessThanOrEqual(4_000);
+        expect(agency.of("/approvals")[0]?.body).toMatchObject({ fence: 1, key: row!.key });
+        await expect
+            .poll(() => agency.progress(), { timeout: 10_000 })
+            .toContain("Waiting for approval: Write");
+        // It waits: re-reading the approval, with nothing written.
+        await expect
+            .poll(() => agency.of(`/approvals/${encodeURIComponent(row!.key)}`).length, {
+                timeout: 10_000,
+            })
+            .toBeGreaterThanOrEqual(1);
+        expect(existsSync(hello)).toBe(false);
+        expect(agency.run.state).toBe("running");
+
+        row!.state = "approved";
+        row!.answeredBy = "human-1";
+        await expect.poll(() => agency.run.state, { timeout: 30_000 }).toBe("proposed");
+        expect(await readFile(hello, "utf8")).toBe("hello");
+        expect(agency.receipts()[0]).toMatchObject({
+            outcome: "proposed",
+            summary: "Created hello.txt.",
+            toolCalls: [{ tool: "Write", inputSha256: row!.inputSha256, decision: "approved" }],
+            approvals: [{ key: row!.key, tool: "Write", state: "approved", answeredBy: "human-1" }],
+        });
+        expect(agency.completes()).toEqual([
+            { fence: 1, proposed: true, consumed: 1, reason: "done" },
+        ]);
+    }, 90_000);
+
+    it("tells the model a declined call did not run and ends the run declined", async () => {
+        const agency = await fakeAfkAgency();
+        const installation = await afkInstallation(agency.url);
+        const { runtime, provider, workDir } = await gatedRun(installation, [
+            textTurn("Understood; stopping."),
+        ]);
+        await expect.poll(() => agency.approvals.size, { timeout: 30_000 }).toBe(1);
+        const [row] = [...agency.approvals.values()];
+        row!.state = "denied";
+        row!.answeredBy = "human-1";
+
+        await expect.poll(() => agency.run.state, { timeout: 30_000 }).toBe("declined");
+        expect(agency.completes()).toEqual([
+            {
+                fence: 1,
+                proposed: false,
+                consumed: 1,
+                reason: "approval_denied",
+                outcome: "declined",
+            },
+        ]);
+        expect(existsSync(join(workDir, "hello.txt"))).toBe(false);
+        // The model was answered with an error saying a person declined it.
+        const seen = JSON.stringify(
+            provider.sessions.flatMap((session) => session.requests.map((r) => r.context.messages)),
+        );
+        expect(seen).toContain("A person declined this action");
+        expect(
+            (await runtime.modules.tasks.get(dbCtx(runtime), afkDerivedId("t", RUN)))?.status,
+        ).toBe("archived");
+        const paths = agency.calls.map((call) => call.path);
+        expect(paths.indexOf(`/internal/agency/runs/${RUN}/artifacts`)).toBeLessThan(
+            paths.indexOf(`/internal/agency/runs/${RUN}/complete`),
+        );
+        expect(agency.receipts()[0]).toMatchObject({
+            outcome: "declined",
+            toolCalls: [{ tool: "Write", decision: "denied" }],
+            approvals: [{ key: row!.key, tool: "Write", state: "denied", answeredBy: "human-1" }],
+        });
+    }, 90_000);
+
+    it("ends the run when a person asks Orkest to stop it", async () => {
+        const agency = await fakeAfkAgency();
+        const installation = await afkInstallation(agency.url);
+        const runtime = await afkHappy(installation, new ScriptedProvider([hangingTurn]));
+        await expect.poll(() => agency.progress()[0], { timeout: 30_000 }).toBe("Started");
+        agency.run.stopRequestedAt = new Date().toISOString();
+
+        await expect.poll(() => agency.run.state, { timeout: 30_000 }).toBe("declined");
+        expect(agency.completes()).toEqual([
+            {
+                fence: 1,
+                proposed: false,
+                consumed: 1,
+                reason: "stopped_by_person",
+                outcome: "declined",
+            },
+        ]);
+        expect(agency.receipts()[0]).toMatchObject({ runId: RUN, outcome: "stopped" });
+        expect(
+            (await runtime.modules.tasks.get(dbCtx(runtime), afkDerivedId("t", RUN)))?.status,
+        ).toBe("archived");
+    }, 90_000);
+
+    it("does not ask again for a call a person already answered before a restart", async () => {
+        const agency = await fakeAfkAgency();
+        const installation = await afkInstallation(agency.url);
+        const first = await gatedRun(installation, []);
+        await expect.poll(() => agency.approvals.size, { timeout: 30_000 }).toBe(1);
+        await first.runtime.closeForTest();
+        const [row] = [...agency.approvals.values()];
+        row!.state = "approved";
+        row!.answeredBy = "human-1";
+
+        const callsBefore = agency.calls.length;
+        const second = await gatedRun(installation, [textTurn("Created hello.txt.")]);
+        await expect.poll(() => agency.run.state, { timeout: 30_000 }).toBe("proposed");
+        const later = agency.calls.slice(callsBefore);
+        const asks = agency.of(`/afk/${RUN}/approvals`);
+        expect(asks).toHaveLength(2);
+        expect(new Set(asks.map((c) => (c.body as { key: string }).key))).toEqual(
+            new Set([row!.key]),
+        );
+        expect(agency.approvals.size).toBe(1);
+        // The stored answer came back with the replay: no waiting, no re-reading.
+        expect(later.some((c) => c.method === "GET" && c.path.includes("/approvals/"))).toBe(false);
+        expect(
+            later
+                .filter((c) => c.path.endsWith("/publish"))
+                .map((c) => (c.body as { payload: { text: string } }).payload.text),
+        ).not.toContain("Waiting for approval: Write");
+        expect(await readFile(join(second.workDir, "hello.txt"), "utf8")).toBe("hello");
+        expect(agency.completes()).toEqual([
+            { fence: 2, proposed: true, consumed: 1, reason: "done" },
+        ]);
+        expect(agency.receipts()[0]).toMatchObject({
+            toolCalls: [{ tool: "Write", decision: "approved" }],
+        });
+    }, 120_000);
+});
