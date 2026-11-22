@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, rmdir, symlink } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -47,7 +47,8 @@ const SUMMARY_LIMIT = 4_000;
 const PREVIEW_LIMIT = 4_000;
 
 /**
- * Tools that only read the run's work directory, run without asking. The names are each vendor's
+ * Tools that only read; they run without asking when what they read is inside the run's folder
+ * (`afkReadStaysInside`). The names are each vendor's
  * own (Claude/Kimi `Read`, `Glob`, `Grep`, `ReadMediaFile`; Grok `read_file`, `list_dir`, `grep`;
  * Codex `view_image`). Everything else, shells included, waits for a person's approval.
  */
@@ -61,6 +62,49 @@ export const AFK_READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
     "grep",
     "view_image",
 ]);
+
+/**
+ * The arguments of the read-only tools that name a path (each vendor's spelling). `pattern` is a path
+ * only for the listing tools; Grep's `pattern` is a regular expression.
+ */
+const AFK_PATH_ARGUMENTS: ReadonlySet<string> = new Set([
+    "file_path",
+    "path",
+    "paths",
+    "notebook_path",
+    "directory",
+    "dir",
+    "target_directory",
+    "absolute_path",
+    "image_path",
+]);
+const AFK_PATTERN_IS_PATH: ReadonlySet<string> = new Set(["Glob", "list_dir"]);
+
+/**
+ * True when every path a read-only call names resolves inside the run's own folder (GHO-189 audit).
+ * Only then does it run unasked; a read anywhere else (the worker's token files, the operator's
+ * `.env`, another run) goes to a person like any other action. Anything it cannot read as a path
+ * counts as outside, so the check fails toward asking.
+ */
+export function afkReadStaysInside(tool: string, directory: string, args: unknown): boolean {
+    if (args === null || args === undefined) return true;
+    if (typeof args !== "object" || Array.isArray(args)) return false;
+    const root = resolve(directory);
+    for (const [name, value] of Object.entries(args as Record<string, unknown>)) {
+        const isPath =
+            AFK_PATH_ARGUMENTS.has(name) || (name === "pattern" && AFK_PATTERN_IS_PATH.has(tool));
+        if (!isPath || value === undefined || value === null) continue;
+        const values = Array.isArray(value) ? value : [value];
+        for (const candidate of values) {
+            if (typeof candidate !== "string") return false;
+            if (candidate.trim() === "") continue;
+            if (candidate.startsWith("~")) return false;
+            const inside = relative(root, resolve(root, candidate));
+            if (inside.startsWith("..") || isAbsolute(inside)) return false;
+        }
+    }
+    return true;
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -78,6 +122,8 @@ interface HeldRun {
     readonly workLabel: string;
     readonly taskId: string;
     readonly agentId: string;
+    /** The task folder the agent works in; read-only tools run unasked only inside it. */
+    readonly directory: string;
     fence: number;
     lastHeartbeat: number;
     lastProgress: number;
@@ -361,6 +407,7 @@ export class OrkestAfkModule implements AgentModule {
             workLabel: run.workLabel,
             taskId: task.id,
             agentId: task.agentId,
+            directory: task.path,
             fence,
             lastHeartbeat: Date.now(),
             lastProgress: 0,
@@ -438,7 +485,7 @@ export class OrkestAfkModule implements AgentModule {
         const text = [
             `Orkest work item ${heading}`,
             run.brief,
-            "You are working unattended in this task's folder. Reading files runs directly; every other action waits for a person to approve it in Orkest, and a declined action must not be retried or worked around. When you are done, reply with a short summary of what you changed.",
+            "You are working unattended in this task's folder. Reading files inside this task's folder runs directly; every other action, reading elsewhere included, waits for a person to approve it in Orkest, and a declined action must not be retried or worked around. When you are done, reply with a short summary of what you changed.",
         ]
             .filter((part) => part.trim().length > 0)
             .join("\n\n")
@@ -490,7 +537,10 @@ export class OrkestAfkModule implements AgentModule {
                 "A person already declined an action in this run; nothing else runs. Stop.",
             );
         }
-        if (AFK_READ_ONLY_TOOLS.has(tool)) {
+        if (
+            AFK_READ_ONLY_TOOLS.has(tool) &&
+            afkReadStaysInside(tool, held.directory, call.arguments)
+        ) {
             held.toolCalls.push({ tool, inputSha256, decision: "ran" });
             await this.#progress(held, `Running: ${tool}`);
             return { type: "run" };
