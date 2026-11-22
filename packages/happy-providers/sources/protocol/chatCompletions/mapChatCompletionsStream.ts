@@ -32,7 +32,7 @@ export async function* mapChatCompletionsStream(
         }
         const choice = chunk.choices.find((item) => item.index === 0);
         if (choice === undefined) continue;
-        if (choice.finish_reason !== null) finish = choice.finish_reason;
+        if (choice.finish_reason != null) finish = choice.finish_reason;
         for (const [kind, delta] of [
             ["reasoning", choice.delta.reasoning_content ?? choice.delta.reasoning],
             ["text", choice.delta.content],
