@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, rmdir, unlink, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -470,6 +470,7 @@ describe("Orkest AFK owner (GHO-189.3.1)", () => {
         await mkdir(repo);
         const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "pipe" });
         git("init", "-q");
+        git("config", "core.autocrlf", "false");
         await writeFile(join(repo, "README.md"), "repo\n");
         git("add", ".");
         git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init");
@@ -483,6 +484,8 @@ describe("Orkest AFK owner (GHO-189.3.1)", () => {
         expect(existsSync(join(runDir, ".git"))).toBe(true);
         expect(await readFile(join(runDir, "README.md"), "utf8")).toBe("repo\n");
         const task = await runtime.modules.tasks.get(dbCtx(runtime), afkDerivedId("t", RUN));
+        // The task folder is a link; remove it before its target so the suite root can be removed.
+        cleanups.push(async () => await unlink(task!.path).catch(() => rmdir(task!.path)));
         expect(await realpath(task!.path)).toBe(await realpath(runDir));
     }, 90_000);
 
