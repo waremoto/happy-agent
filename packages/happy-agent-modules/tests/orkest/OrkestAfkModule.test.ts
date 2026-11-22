@@ -16,6 +16,7 @@ import {
     OrkestAfkModule,
     afkDerivedId,
     afkFolderName,
+    afkReadStaysInside,
     derivedId,
 } from "../../sources/orkest/index.js";
 import {
@@ -578,6 +579,52 @@ async function gatedRun(
 
 const writeKey = (path: string) =>
     `Write:${inputSha256({ file_path: path, content: "hello" }).slice(0, 32)}`;
+
+describe("Orkest AFK read scope (GHO-189 audit)", () => {
+    it("runs a read unasked only when every path it names stays inside the run's folder", () => {
+        const dir = join(tmpdir(), "afk-scope", "orkest_afk_x");
+        expect(afkReadStaysInside("Glob", dir, { pattern: "*" })).toBe(true);
+        expect(afkReadStaysInside("Glob", dir, {})).toBe(true);
+        expect(afkReadStaysInside("Read", dir, { file_path: "hello.txt" })).toBe(true);
+        expect(afkReadStaysInside("Read", dir, { file_path: join(dir, "sub", "a.md") })).toBe(true);
+        // Grep's pattern is a regular expression, not a path.
+        expect(afkReadStaysInside("Grep", dir, { pattern: "^/api|\.\./", path: "src" })).toBe(true);
+        expect(
+            afkReadStaysInside("Read", dir, { file_path: join(dir, "..", "orkest.token") }),
+        ).toBe(false);
+        expect(afkReadStaysInside("Read", dir, { file_path: "../../orkest.token" })).toBe(false);
+        expect(
+            afkReadStaysInside("Read", dir, { file_path: join(tmpdir(), "other", ".env") }),
+        ).toBe(false);
+        expect(afkReadStaysInside("Glob", dir, { pattern: "../**/*.token" })).toBe(false);
+        expect(afkReadStaysInside("Glob", dir, { pattern: "*", path: tmpdir() })).toBe(false);
+        expect(afkReadStaysInside("Grep", dir, { pattern: "x", path: tmpdir() })).toBe(false);
+        expect(afkReadStaysInside("read_file", dir, { path: "~/.ssh/id_rsa" })).toBe(false);
+        expect(afkReadStaysInside("Read", dir, { file_path: 42 })).toBe(false);
+        expect(afkReadStaysInside("Read", dir, { file_path: [join(tmpdir(), "x")] })).toBe(false);
+    });
+
+    it("asks a person before a read outside the run's folder, such as its own token file", async () => {
+        const agency = await fakeAfkAgency({ autoAnswer: "denied" });
+        const installation = await afkInstallation(agency.url);
+        const outside = join(installation.home, "orkest-afk.token");
+        const provider = new ScriptedProvider([
+            toolCallTurn("callread1", "Read", JSON.stringify({ file_path: outside })),
+            textTurn("Stopping."),
+        ]);
+        await afkHappy(installation, provider);
+        await expect.poll(() => agency.run.state, { timeout: 30_000 }).toBe("declined");
+        expect([...agency.approvals.values()]).toMatchObject([{ tool: "Read", state: "denied" }]);
+        expect(agency.receipts()[0]).toMatchObject({
+            outcome: "declined",
+            toolCalls: [{ tool: "Read", decision: "denied" }],
+        });
+        const seen = JSON.stringify(
+            provider.sessions.flatMap((session) => session.requests.map((r) => r.context.messages)),
+        );
+        expect(seen).not.toContain(SERVICE_TOKEN);
+    }, 90_000);
+});
 
 describe("Orkest AFK tool policy (GHO-189.3.2)", () => {
     it("runs a read-only tool without asking anyone", async () => {
