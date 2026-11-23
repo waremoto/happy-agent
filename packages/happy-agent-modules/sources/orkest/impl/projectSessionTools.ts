@@ -215,6 +215,9 @@ function refusal(answer: Exclude<OrkestSessionAnswer, { ok: true }>): string {
             return "A person is typing in this doc on the Board right now. Wait for them to finish, then read it again and propose.";
         case "ORKEST_SESSION_READ_ONLY":
             return "This session is read only: it cannot propose changes.";
+        case "read_only_for_ai":
+            // GHO-200 (stage 7): the note's owner set it to view for AI in Botanic; refused before any room write.
+            return "The note's owner set this note read only for AI in Botanic; nothing was proposed. Answer in prose instead, and say the note is read only.";
         case "ORKEST_SESSION_PROPOSAL_TOO_LARGE":
             return "The document is over 60 000 characters, which a proposal cannot carry. Say so to the person.";
         case "out_of_scope":
