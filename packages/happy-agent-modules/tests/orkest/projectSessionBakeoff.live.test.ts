@@ -37,6 +37,8 @@ interface BakeoffSpec {
     readonly dir: string;
     readonly doc: string;
     readonly idleMs?: number;
+    /** The first command to read; a driver restarted after a kill continues where the killed one stopped. */
+    readonly firstCmd?: number;
 }
 
 type Cmd =
@@ -177,7 +179,7 @@ describe.skipIf(!SPEC)("Orkest project session bake-off on Happy (GHO-202)", () 
             };
             await load();
 
-            for (let k = 1; ; k++) {
+            for (let k = spec.firstCmd ?? 1; ; k++) {
                 const cmd = await waitFile<Cmd>(join(spec.dir, `cmd-${k}.json`), 3_600_000);
                 if (!cmd || cmd.type === "end") break;
                 const from = (await load()).length;
