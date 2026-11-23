@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-// GHO-196.1.1 — the Happy adapter's pinned copy of Hoja 0.5.0 (D-17, D-25). The copy is edited in D:/ware/hoja and
+// GHO-196.1.1 — the Happy adapter's pinned copy of Hoja (0.5.0, D-17, D-25; 0.5.1 since GHO-200.3.3). The copy is edited in D:/ware/hoja and
 // re-vended, never here: every file must match hoja.pin.json and nothing unpinned may sit beside it.
 const ROOT = fileURLToPath(new URL("../../sources/orkest/hoja", import.meta.url));
 
@@ -18,14 +18,14 @@ function filesUnder(dir: string, prefix = ""): string[] {
 }
 
 describe("vended Hoja", () => {
-    it("is Hoja 0.5.0 and every file matches its pin", () => {
+    it("is Hoja 0.5.1 and every file matches its pin", () => {
         const pinPath = join(ROOT, "hoja.pin.json");
         expect(existsSync(pinPath)).toBe(true);
         const pin = JSON.parse(readFileSync(pinPath, "utf8")) as {
             version: string;
             files: Record<string, string>;
         };
-        expect(pin.version).toBe("0.5.0");
+        expect(pin.version).toBe("0.5.1");
         expect(Object.keys(pin.files)).toContain("assist/contract.mjs");
         for (const [name, hash] of Object.entries(pin.files)) {
             const actual = createHash("sha256")
