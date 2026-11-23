@@ -26,6 +26,14 @@ import {
 import { attendedToolScope } from "./impl/attendedToolScope.js";
 import { claudeSessionIdFor } from "./impl/claudeSessionId.js";
 import { handoffContinuationText, readHandoffContinuation } from "./impl/handoffContinuation.js";
+import { OrkestSessionClient, type OrkestSessionCall } from "./impl/OrkestSessionClient.js";
+import {
+    isProjectSession,
+    openProjectSession,
+    projectSessionState,
+    type ProjectSessionState,
+} from "./impl/projectSessionOpen.js";
+import { projectSessionPreamble } from "./impl/projectSessionPreamble.js";
 
 /** How often the owner reads Orkest; a person who just clicked waits at most this long. */
 const POLL_MS = 2_000;
@@ -47,6 +55,8 @@ interface OpenSession {
     lastHeartbeat: number;
     /** The Claude session id Orkest last accepted for this run; re-sent after a restart (a no-op there). */
     linkedAgentSession?: string;
+    /** GHO-196 — set on a project or doc session (backend happy): its scope, task folder and focus doc. */
+    project?: ProjectSessionState;
 }
 
 /**
@@ -86,6 +96,19 @@ export class OrkestModule implements AgentModule {
     readonly beforeStart = (ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
         this.#agents = agents;
         return {
+            // GHO-196: a project or doc session's agent is told its project, focus doc and the proposal contract.
+            instructions: (_ctx, scope) => {
+                const session = [...this.#open.values()].find((s) => s.agentId === scope.agent.id);
+                if (!session?.project || !this.#config.attendedOnly) return "";
+                const p = session.project;
+                return projectSessionPreamble({
+                    title: p.title,
+                    scope: p.scope,
+                    permissionMode: p.permissionMode,
+                    ...(p.focus === undefined ? {} : { focus: p.focus }),
+                    docs: p.docs,
+                });
+            },
             tools: (_ctx, scope) => {
                 const endpoint = this.#config.orkestAgency;
                 const session = [...this.#open.values()].find((s) => s.agentId === scope.agent.id);
@@ -177,7 +200,8 @@ export class OrkestModule implements AgentModule {
         // Sessions this worker already owns, including after its own restart.
         for (const session of await agency.active(workerId)) {
             const open =
-                this.#open.get(session.runId) ?? (await this.#resume(agency, session, workerId));
+                this.#open.get(session.runId) ??
+                (await this.#resume(agency, session, workerId, ctx));
             if (open === undefined) continue;
             if (session.endRequestedAt !== null)
                 await this.#finish(ctx, agency, open, "ended by a person");
@@ -295,7 +319,8 @@ export class OrkestModule implements AgentModule {
             name: session.title.slice(0, 120),
             mode,
         });
-        await this.#draft(ctx, task.agentId, mode, session);
+        // A project or doc session has no work item to draft: the person's first message is theirs (GHO-196).
+        if (!isProjectSession(session)) await this.#draft(ctx, task.agentId, mode, session);
         const ack = await agency.acknowledge(session.intentId, task.id);
         if (!ack.ok) {
             // Cancelled before it opened, or acknowledged as another task: nothing of ours runs.
@@ -307,13 +332,18 @@ export class OrkestModule implements AgentModule {
             await this.#archive(ctx, task.id);
             return;
         }
-        this.#open.set(session.runId, {
+        const opened: OpenSession = {
             runId: session.runId,
             taskId: task.id,
             agentId: task.agentId,
             fence: lease.fence,
             lastHeartbeat: Date.now(),
-        });
+            ...(isProjectSession(session)
+                ? { project: projectSessionState(session, task.path) }
+                : {}),
+        };
+        this.#open.set(session.runId, opened);
+        await this.#openProject(opened);
         await agency.publish(session.runId, lease.fence, "attended.session_opened", {
             taskId: task.id,
             agentId: task.agentId,
@@ -340,20 +370,56 @@ export class OrkestModule implements AgentModule {
         agency: OrkestAgencyClient,
         session: AttendedSession,
         workerId: string,
+        ctx?: Context,
     ): Promise<OpenSession | undefined> {
         if (session.ownerJobRef === null) return undefined;
         // A new attempt with a higher fence: the previous process's fence stops counting.
         const lease = await agency.claim(session.runId, workerId, LEASE_SECONDS);
         if (lease === undefined) return undefined;
+        let project: ProjectSessionState | undefined;
+        if (isProjectSession(session) && ctx !== undefined) {
+            const task = await this.#tasks.get(ctx, session.ownerJobRef);
+            if (task !== undefined) project = projectSessionState(session, task.path);
+        }
         const open: OpenSession = {
             runId: session.runId,
             taskId: session.ownerJobRef,
             agentId: derivedId("a", session.runId),
             fence: lease.fence,
             lastHeartbeat: Date.now(),
+            ...(project === undefined ? {} : { project }),
         };
         this.#open.set(session.runId, open);
+        await this.#openProject(open);
         return open;
+    }
+
+    /** The session seam's call for an open project session, with its current fence. */
+    #sessionCall(open: OpenSession): OrkestSessionCall | undefined {
+        if (!open.project) return undefined;
+        return { session: open.runId, fence: open.fence, projectId: open.project.scope.projectId };
+    }
+
+    /** GHO-196: write the focus doc's working copy and learn whether the project has docs. Never throws. */
+    async #openProject(open: OpenSession): Promise<void> {
+        const call = this.#sessionCall(open);
+        if (!open.project || !call) return;
+        const endpoint = this.#config.orkestSession;
+        if (endpoint === undefined) {
+            this.#lastError = "Project sessions need ORKEST_SESSION_URL and a worker token.";
+            return;
+        }
+        try {
+            const problem = await openProjectSession(
+                new OrkestSessionClient(endpoint),
+                call,
+                open.project,
+            );
+            if (problem !== undefined) this.#lastError = problem;
+        } catch (error) {
+            this.#lastError =
+                error instanceof Error ? error.message : "Project session open failed.";
+        }
     }
 
     async #finish(

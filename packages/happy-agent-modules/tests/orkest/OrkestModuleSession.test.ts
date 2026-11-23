@@ -269,7 +269,11 @@ describe("Orkest project session on Happy (GHO-196)", () => {
         const task = await openTask(runtime, father);
 
         const config = await runtime.system.config(dbCtx(runtime), derivedId("a", RUN));
-        expect(config?.metadata?.["draft"]).toBeUndefined();
+        // The composer keeps the session's mode, but no drafted text: the person's first message is theirs.
+        expect(config?.metadata?.["draft"]).toMatchObject({
+            text: "",
+            permissionMode: "workspace_write",
+        });
         await expect
             .poll(
                 async () => readFile(join(task.path, "doc", "ROADMAP.md"), "utf8").catch(() => ""),

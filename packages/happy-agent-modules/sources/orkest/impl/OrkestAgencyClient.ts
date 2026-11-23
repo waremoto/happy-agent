@@ -26,6 +26,17 @@ export const attendedSessionSchema = Type.Object({
     fence: Type.Number(),
     /** Present only for a session opened from a handoff; read leniently by `readHandoffContinuation`. */
     continuation: Type.Optional(Type.Unknown()),
+    /** GHO-195/196 — present only on a project or doc session (no ticket). */
+    scope: Type.Optional(
+        Type.Object({
+            kind: Type.Union([Type.Literal("project"), Type.Literal("doc")]),
+            projectId: Type.String({ minLength: 1, maxLength: 80 }),
+            path: Type.Optional(Type.Union([Type.String({ maxLength: 300 }), Type.Null()])),
+        }),
+    ),
+    /** GHO-195 — `happy` or `librechat`; present only on a project or doc session. */
+    backend: Type.Optional(Type.String()),
+    startedBy: Type.Optional(Type.Unknown()),
 });
 export type AttendedSession = Static<typeof attendedSessionSchema>;
 
