@@ -314,3 +314,146 @@ describe("Orkest project session on Happy (GHO-196)", () => {
         await expect(readFile(join(task.path, "doc", "ROADMAP.md"), "utf8")).rejects.toThrow();
     }, 90_000);
 });
+
+describe("Orkest project session tools on Happy (GHO-196.2.2)", () => {
+    const copy = (taskPath: string, name = "ROADMAP.md") => join(taskPath, "doc", name);
+    const toolTurn = (
+        callId: string,
+        name: string,
+        args: unknown,
+        before?: () => Promise<void>,
+    ): ScriptedTurn =>
+        before === undefined
+            ? toolCallTurn(callId, name, JSON.stringify(args))
+            : () =>
+                  (async function* () {
+                      await before();
+                      yield* toolCallTurn(callId, name, JSON.stringify(args));
+                  })();
+    const toolResults = (provider: ScriptedProvider) =>
+        JSON.stringify(requests(provider).map((r) => r.context.messages));
+
+    it("proposes the edited working copy whole, with its base, turn, model and session id", async () => {
+        const father = await fakeFather(SCOPE);
+        const dashboard = await fakeDashboard();
+        const { runtime, provider } = await happy(father.url, dashboard.url, [
+            toolTurn("c1", "propose_document", {
+                path: "docs/ROADMAP.md",
+                why: "add a third step",
+            }),
+            textTurn("Proposed."),
+        ]);
+        const task = await openTask(runtime, father);
+        await expect
+            .poll(async () => readFile(copy(task.path), "utf8").catch(() => ""), {
+                timeout: 10_000,
+            })
+            .toBe(ROADMAP);
+        await writeFile(copy(task.path), `${ROADMAP}- three\n`);
+        await say(runtime, "Add a third step.", "m1");
+        await expect.poll(() => dashboard.proposals.length, { timeout: 20_000 }).toBe(1);
+        const sent = dashboard.proposals[0]!;
+        expect(sent).toMatchObject({
+            session: RUN,
+            fence: 1,
+            projectId: PROJECT,
+            path: "docs/ROADMAP.md",
+            baseRev: REV,
+            text: `${ROADMAP}- three\n`,
+            why: "add a third step",
+            model: "codex-cli/gpt-6.1-sol",
+            agentSessionId: derivedId("t", RUN),
+        });
+        expect(String(sent.turn)).toMatch(/^[A-Za-z0-9._:-]{1,100}$/);
+        await expect
+            .poll(() => toolResults(provider), { timeout: 20_000 })
+            .toContain("Proposed 2 change");
+    }, 90_000);
+
+    it("refreshes the working copy on a stale base and lands the re-applied change", async () => {
+        const father = await fakeFather(SCOPE);
+        const dashboard = await fakeDashboard({ staleOnce: true });
+        let taskPath = "";
+        const { runtime, provider } = await happy(father.url, dashboard.url, [
+            toolTurn("c1", "propose_document", { path: "docs/ROADMAP.md", why: "add three" }),
+            toolTurn(
+                "c2",
+                "propose_document",
+                { path: "docs/ROADMAP.md", why: "add three again" },
+                async () => {
+                    const current = await readFile(copy(taskPath), "utf8");
+                    await writeFile(copy(taskPath), `${current}- three\n`);
+                },
+            ),
+            textTurn("Proposed after the doc moved."),
+        ]);
+        const task = await openTask(runtime, father);
+        taskPath = task.path;
+        await expect
+            .poll(async () => readFile(copy(task.path), "utf8").catch(() => ""), {
+                timeout: 10_000,
+            })
+            .toBe(ROADMAP);
+        await writeFile(copy(task.path), `${ROADMAP}- three\n`);
+        await say(runtime, "Add a third step.", "m1");
+        await expect.poll(() => dashboard.proposals.length, { timeout: 30_000 }).toBe(2);
+        expect(dashboard.proposals[0]).toMatchObject({ baseRev: REV });
+        expect(dashboard.proposals[1]).toMatchObject({ baseRev: REV2 });
+        expect(String(dashboard.proposals[1]!.text)).toContain("moved by a person");
+        expect(String(dashboard.proposals[1]!.text).endsWith("- three\n")).toBe(true);
+        expect(await readFile(join(task.path, "doc", ".stale", "ROADMAP.md"), "utf8")).toBe(
+            `${ROADMAP}- three\n`,
+        );
+        expect(toolResults(provider)).toMatch(/moved/);
+    }, 90_000);
+
+    it("proposes a new doc with no base, which waits for the person's approval", async () => {
+        const father = await fakeFather(SCOPE);
+        const dashboard = await fakeDashboard();
+        let taskPath = "";
+        const { runtime, provider } = await happy(father.url, dashboard.url, [
+            toolTurn(
+                "c1",
+                "propose_document",
+                { path: "docs/plan-b.md", why: "start plan B" },
+                async () => {
+                    await writeFile(copy(taskPath, "plan-b.md"), "# Plan B\n");
+                },
+            ),
+            textTurn("Asked."),
+        ]);
+        taskPath = (await openTask(runtime, father)).path;
+        await say(runtime, "Start a plan B doc.", "m1");
+        await expect.poll(() => dashboard.proposals.length, { timeout: 20_000 }).toBe(1);
+        expect(dashboard.proposals[0]).toMatchObject({
+            path: "docs/plan-b.md",
+            baseRev: null,
+            text: "# Plan B\n",
+        });
+        await expect.poll(() => toolResults(provider), { timeout: 20_000 }).toMatch(/approv/);
+    }, 90_000);
+
+    it("reads a doc into its working copy through read_doc", async () => {
+        const father = await fakeFather({
+            kind: "doc",
+            projectId: PROJECT,
+            path: "docs/ROADMAP.md",
+        });
+        const dashboard = await fakeDashboard();
+        const { runtime, provider } = await happy(father.url, dashboard.url, [
+            toolTurn("c1", "read_doc", { path: "docs/ROADMAP.md" }),
+            toolTurn("c2", "list_tickets", {}),
+            textTurn("Read."),
+        ]);
+        const task = await openTask(runtime, father);
+        await say(runtime, "Read the roadmap.", "m1");
+        await expect
+            .poll(() => toolResults(provider), { timeout: 20_000 })
+            .toContain("doc/ROADMAP.md");
+        expect(
+            dashboard.calls.filter((c) => c.path.endsWith("/tools/read_doc")).length,
+        ).toBeGreaterThanOrEqual(2);
+        expect(dashboard.calls.some((c) => c.path.endsWith("/tools/list_tickets"))).toBe(true);
+        expect(await readFile(copy(task.path), "utf8")).toBe(ROADMAP);
+    }, 90_000);
+});
