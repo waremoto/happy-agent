@@ -45,7 +45,10 @@ export type OrkestSessionAnswer =
           readonly data?: unknown;
       };
 
-/** The tools the seam serves (GHO-195 `ORKEST_SESSION_TOOLS`). */
+/**
+ * The tools the seam serves (GHO-195 `ORKEST_SESSION_TOOLS`, and GHO-199's orchestrator tools). There is no answer
+ * tool: the dashboard refuses every name for one, and this client does not send them.
+ */
 export const ORKEST_SESSION_TOOLS = [
     "list_docs",
     "read_doc",
@@ -55,6 +58,14 @@ export const ORKEST_SESSION_TOOLS = [
     "read_ticket",
     "list_runs",
     "read_run",
+    "start_run",
+    "propose_ticket",
+    "stop_run",
+    "list_children",
+    "list_requests",
+    "read_notes",
+    "ack_notes",
+    "reconcile_roadmap",
 ] as const;
 export type OrkestSessionToolName = (typeof ORKEST_SESSION_TOOLS)[number];
 

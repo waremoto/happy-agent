@@ -35,6 +35,7 @@ import {
 } from "./impl/projectSessionOpen.js";
 import { projectSessionPreamble } from "./impl/projectSessionPreamble.js";
 import { projectSessionTools } from "./impl/projectSessionTools.js";
+import { deliverProjectSessionNotes } from "./impl/projectSessionNotes.js";
 
 /** How often the owner reads Orkest; a person who just clicked waits at most this long. */
 const POLL_MS = 2_000;
@@ -129,6 +130,7 @@ export class OrkestModule implements AgentModule {
                         agentHome: this.#config.configuration.paths.agentHome,
                         agentId: session.agentId,
                         permissionMode: session.project.permissionMode,
+                        scopeKind: session.project.scope.kind,
                         model: () => scope.agent.model ?? session.openingModel,
                         turn: (ctx) =>
                             runKV.getOrCreate(
@@ -313,10 +315,40 @@ export class OrkestModule implements AgentModule {
                         // Do not include the human message, credentials, or response body in diagnostics.
                         this.#lastError = "Candidate message delivery unavailable.";
                     }
+                    // GHO-199: a live project session gets its change notes and the person's quick actions.
+                    if (open.project?.scope.kind === "project") await this.#deliverNotes(ctx, open);
                 }
             }
             // Revoked, superseded or gone: this process no longer owns the run.
             else if (result.final) await this.#drop(ctx, open);
+        }
+    }
+
+    async #deliverNotes(ctx: Context, open: OpenSession): Promise<void> {
+        const seam = this.#config.orkestSession;
+        const call = this.#sessionCall(open);
+        const agents = this.#agents;
+        if (seam === undefined || call === undefined || agents === undefined) return;
+        try {
+            await deliverProjectSessionNotes(new OrkestSessionClient(seam), call, {
+                send: async (text, id, from) => {
+                    const acceptance = await agents.send(
+                        ctx,
+                        open.agentId,
+                        { role: "user", content: [{ type: "text", text }] },
+                        {
+                            id,
+                            metadata:
+                                from === "person"
+                                    ? USER_MESSAGE_ORIGIN_METADATA
+                                    : { ...AGENT_MESSAGE_ORIGIN_METADATA, ...senderAgentIdMetadata(open.agentId) },
+                        },
+                    );
+                    return acceptance.accepted === "created" || acceptance.accepted === "existing";
+                },
+            });
+        } catch {
+            this.#lastError = "Project session notes unavailable.";
         }
     }
 

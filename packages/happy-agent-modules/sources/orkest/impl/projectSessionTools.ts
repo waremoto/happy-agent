@@ -8,6 +8,7 @@ import type {
     OrkestSessionCall,
     OrkestSessionClient,
 } from "./OrkestSessionClient.js";
+import { projectSessionOrchestratorTools } from "./projectSessionOrchestratorTools.js";
 import { workingCopyName } from "./projectSessionPreamble.js";
 import {
     baseFor,
@@ -24,7 +25,8 @@ import {
  *
  * `propose_document` never takes the document from the model: it reads the working copy from disk and sends it
  * whole with the base it was made from (design § 2). Nothing it does writes the doc: the person accepts on the
- * Board (D-22). No tool here can approve, accept, merge or start anything (D-29).
+ * Board (D-22). No tool here can approve, accept or merge anything (D-29). GHO-199: a project session also gets the
+ * orchestrator tools (projectSessionOrchestratorTools.ts), which ask the person to start runs or create tickets.
  */
 export interface ProjectSessionToolsInput {
     readonly client: OrkestSessionClient;
@@ -39,6 +41,8 @@ export interface ProjectSessionToolsInput {
     readonly model: () => string | undefined;
     /** A stable id for the agent turn in progress (the seam allows one proposal per turn). */
     readonly turn: (ctx: Context) => Promise<string>;
+    /** GHO-199 — a project session (not a doc session) gets the orchestrator tools. */
+    readonly scopeKind?: "project" | "doc";
 }
 
 const MAX_TOOL_TEXT = 120_000;
@@ -108,6 +112,14 @@ export function projectSessionTools(input: ProjectSessionToolsInput): readonly A
             toLLM: (text) => [{ type: "text", text }],
         }),
     );
+    if (input.scopeKind === "project")
+        tools.push(
+            ...projectSessionOrchestratorTools({
+                client: input.client,
+                call: input.call,
+                permissionMode: input.permissionMode,
+            }),
+        );
     return tools;
 }
 
@@ -209,6 +221,14 @@ function refusal(answer: Exclude<OrkestSessionAnswer, { ok: true }>): string {
             return "That belongs to another project; this session only reaches its own project.";
         case "doc_not_found":
             return "There is no such doc in this project.";
+        case "done_without_evidence": {
+            const nodes = (answer.data as { nodes?: unknown } | undefined)?.nodes;
+            return `Nothing was proposed: a roadmap node goes to done only when its note names a receipt or run id, or a promoted tracker under docs/orkest/done/ (${Array.isArray(nodes) ? nodes.join(", ") : "a node"} has none). Add the evidence to its note, or leave it as it was, and propose again.`;
+        }
+        case "roadmap_invalid": {
+            const errors = (answer.data as { errors?: unknown } | undefined)?.errors;
+            return `Nothing was proposed: the roadmap would fail its check.\n${Array.isArray(errors) ? errors.map((e) => `- ${String(e)}`).join("\n") : ""}\nFix the roadmap block in your working copy and propose again (the rendered section below it is regenerated for you).`;
+        }
         case "ORKEST_GIT_NO_REPO":
         case "ORKEST_GIT_REPO_NOT_INDEXED":
             return "This project has no docs yet: it has no repository Orkest can read.";
