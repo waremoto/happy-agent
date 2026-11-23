@@ -1,5 +1,5 @@
 import { Type } from "@sinclair/typebox";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
     defineAgentTool,
@@ -34,6 +34,7 @@ import {
     type ProjectSessionState,
 } from "./impl/projectSessionOpen.js";
 import { projectSessionPreamble } from "./impl/projectSessionPreamble.js";
+import { projectSessionTools } from "./impl/projectSessionTools.js";
 
 /** How often the owner reads Orkest; a person who just clicked waits at most this long. */
 const POLL_MS = 2_000;
@@ -57,6 +58,8 @@ interface OpenSession {
     linkedAgentSession?: string;
     /** GHO-196 — set on a project or doc session (backend happy): its scope, task folder and focus doc. */
     project?: ProjectSessionState;
+    /** The model the session opened with, when the agent scope names none. */
+    openingModel?: string;
 }
 
 /**
@@ -113,6 +116,28 @@ export class OrkestModule implements AgentModule {
                 const endpoint = this.#config.orkestAgency;
                 const session = [...this.#open.values()].find((s) => s.agentId === scope.agent.id);
                 if (!endpoint || !session || !this.#config.attendedOnly) return [];
+                if (session.project) {
+                    // GHO-196: a project or doc session reads through the session tools API and edits only by proposal.
+                    const seam = this.#config.orkestSession;
+                    if (seam === undefined) return [];
+                    const runKV = scope.runKV;
+                    return projectSessionTools({
+                        client: new OrkestSessionClient(seam),
+                        call: () => this.#sessionCall(session)!,
+                        taskPath: session.project.taskPath,
+                        taskId: session.taskId,
+                        agentHome: this.#config.configuration.paths.agentHome,
+                        agentId: session.agentId,
+                        permissionMode: session.project.permissionMode,
+                        model: () => scope.agent.model ?? session.openingModel,
+                        turn: (ctx) =>
+                            runKV.getOrCreate(
+                                ctx,
+                                "orkest.turn",
+                                () => `t-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+                            ),
+                    });
+                }
                 const agency = new OrkestAgencyClient(endpoint);
                 return [
                     defineAgentTool({
@@ -338,6 +363,7 @@ export class OrkestModule implements AgentModule {
             agentId: task.agentId,
             fence: lease.fence,
             lastHeartbeat: Date.now(),
+            openingModel: modelId,
             ...(isProjectSession(session)
                 ? { project: projectSessionState(session, task.path) }
                 : {}),
@@ -387,6 +413,9 @@ export class OrkestModule implements AgentModule {
             agentId: derivedId("a", session.runId),
             fence: lease.fence,
             lastHeartbeat: Date.now(),
+            ...(HARNESS_MODELS[session.harness] === undefined
+                ? {}
+                : { openingModel: HARNESS_MODELS[session.harness] }),
             ...(project === undefined ? {} : { project }),
         };
         this.#open.set(session.runId, open);

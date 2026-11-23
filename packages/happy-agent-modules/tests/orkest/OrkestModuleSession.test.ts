@@ -453,7 +453,11 @@ describe("Orkest project session tools on Happy (GHO-196.2.2)", () => {
         expect(
             dashboard.calls.filter((c) => c.path.endsWith("/tools/read_doc")).length,
         ).toBeGreaterThanOrEqual(2);
-        expect(dashboard.calls.some((c) => c.path.endsWith("/tools/list_tickets"))).toBe(true);
+        await expect
+            .poll(() => dashboard.calls.some((c) => c.path.endsWith("/tools/list_tickets")), {
+                timeout: 20_000,
+            })
+            .toBe(true);
         expect(await readFile(copy(task.path), "utf8")).toBe(ROADMAP);
     }, 90_000);
 });
