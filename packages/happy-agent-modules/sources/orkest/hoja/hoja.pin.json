@@ -1,0 +1,31 @@
+{
+  "name": "@waremoto/hoja",
+  "version": "0.5.0",
+  "commit": "dd3e0ff35bed2bad511c0e93c4afd715e987cd5d",
+  "binding": null,
+  "files": {
+    "blocks.mjs": "48e1eedbedec68e2944af045938ac4c963faf7adfd4d16a8007b63c53c729152",
+    "ops.mjs": "1471c78fd4c34da5ee41d7c324703341a71c5dd5d6eb37107ef65742ee9cd364",
+    "menus.mjs": "c3f85b1a00395bad3a555137daba763aece6494936b3d5a424eabb168bb59c19",
+    "ai.mjs": "0b8defcf495cb251247e948fcd52e7aaebcd4089c69358f55026d8d7b499a94e",
+    "store.mjs": "59904707b718991abd6a613eef7d12a55174d35f83a8a5d14f65e6afa760b074",
+    "export.mjs": "440bd773f5694a20271c9513305d6333f88151957f9507a8ef16e23097b773e8",
+    "proposal.mjs": "e66dd8159ad348695cf954429423d53429e99b1d2d33278c85a97a3a50f80477",
+    "chrome.mjs": "465e8243c01964b2c8604b9b37d2e3dee21b5722a6b2a26ba9e3b6b6070a614b",
+    "index.mjs": "2eed0961bb6d1160fbc06ee477c1bed145d80e5e8b94a05023e462d8f5833b66",
+    "index.d.mts": "36ad3342ee672504f5f3ca83ee6fe9c5017b08219bf813277aa9234b1c73dc00",
+    "hoja.css": "70d6c569094cc8b30dad719590a4981f2ebe71801af8adcd48b24917fba4482a",
+    "rich.mjs": "507b0a3e4f86d97f1f60006646d8a84a5cee6f89141f1643993dad2bb3da1133",
+    "rich.d.mts": "cd8b0e666292373976151e2f7f790578208fdd66e38fef0554e2ed56983f2567",
+    "tiptap.mjs": "141f0d5bbf95d3c501eb9bb266aca21888a4961c914a0ed4113ef80d3ba5bae9",
+    "tiptap.d.mts": "76d129f3e4718fba176ecf5dd54eba27593752b6a5280ad7e62ba452e4cc5ea2",
+    "assist/fence.mjs": "c02e4707f0c9bf1045101fa5afd576b2a0adaa136aae4c26d625045242ef2049",
+    "assist/view.mjs": "5e9ffb144482c06d63c7ddab16108aaff73433d4dfeaacc3e4ce4ff444a1550f",
+    "assist/contract.mjs": "3f38b1ae984ddd5127b1f1c7909d48fcab4892867f7e5c0b1d19c6f3750bd4fd",
+    "assist/context.mjs": "8a65eda0641540582ea6f0a92a38ac837823378f010b16cb331a79a252f1f3a6",
+    "assist/guards.mjs": "2a1ab5a44f1070a18d81c307094d67d42aafc2aca9e4fb233dbad82ac8b9148d",
+    "assist/actions.mjs": "545807dd4e963ac420241cd04cf41138bf8e4095b4d600f3554438df2770839d",
+    "assist/index.mjs": "60b687e1546bc1dcf5d9d858c4cac6d6b04fb84d9fb0b984a62011fad9b6fc6d",
+    "assist/index.d.mts": "e1965fe098795ba66b8a4dfb91fdbed651d4b63aefa59a7132d2ea44e337bcce"
+  }
+}

@@ -1,0 +1,10 @@
+// Hoja: the source-faithful document core shared by Orkest and Botanic. Design: D:/ware/orkest/docs/design/hoja-document.md
+export const HOJA_VERSION = '0.5.0'
+export * from './blocks.mjs'
+export * from './ops.mjs'
+export * from './menus.mjs'
+export * from './ai.mjs'
+export * from './store.mjs'
+export * from './export.mjs'
+export * from './proposal.mjs'
+export { attachChrome, attachSlash, createSlashMenu, caretRect, slashQuery, setFieldValue, copyText } from './chrome.mjs'

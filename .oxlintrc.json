@@ -3,5 +3,5 @@
     "env": {
         "node": true
     },
-    "ignorePatterns": ["dist"]
+    "ignorePatterns": ["dist", "packages/happy-agent-modules/sources/orkest/hoja/**"]
 }

@@ -1,0 +1,145 @@
+/* Hoja chrome. Hosts theme it through these variables (each falls back to a neutral light/dark pair). */
+.hoja-layer {
+  --hoja-bg: var(--hoja-host-bg, #ffffff);
+  --hoja-fg: var(--hoja-host-fg, #1f2328);
+  --hoja-muted: var(--hoja-host-muted, #6b7280);
+  --hoja-border: var(--hoja-host-border, rgba(15, 23, 42, 0.12));
+  --hoja-hover: var(--hoja-host-hover, rgba(15, 23, 42, 0.06));
+  --hoja-accent: var(--hoja-host-accent, #2383e2);
+  --hoja-danger: var(--hoja-host-danger, #d1242f);
+  --hoja-shadow: 0 1px 2px rgba(15, 23, 42, 0.08), 0 8px 24px rgba(15, 23, 42, 0.14);
+  font: 13px/1.35 var(--hoja-host-font, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif);
+  color: var(--hoja-fg);
+}
+@media (prefers-color-scheme: dark) {
+  .hoja-layer {
+    --hoja-bg: var(--hoja-host-bg, #1f1f1f);
+    --hoja-fg: var(--hoja-host-fg, #e6e6e6);
+    --hoja-muted: var(--hoja-host-muted, #9b9b9b);
+    --hoja-border: var(--hoja-host-border, rgba(255, 255, 255, 0.12));
+    --hoja-hover: var(--hoja-host-hover, rgba(255, 255, 255, 0.07));
+  }
+}
+html.dark .hoja-layer, [data-theme='dark'] .hoja-layer {
+  --hoja-bg: var(--hoja-host-bg, #1f1f1f);
+  --hoja-fg: var(--hoja-host-fg, #e6e6e6);
+  --hoja-muted: var(--hoja-host-muted, #9b9b9b);
+  --hoja-border: var(--hoja-host-border, rgba(255, 255, 255, 0.12));
+  --hoja-hover: var(--hoja-host-hover, rgba(255, 255, 255, 0.07));
+}
+
+.hoja-handle {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  height: 24px;
+}
+.hoja-handle[hidden], .hoja-drop[hidden], .hoja-handle [hidden] { display: none; }
+.hoja-handle button, .hoja-fold-pill {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px;
+  height: 24px;
+  padding: 0 2px;
+  border-radius: 4px;
+  color: var(--hoja-muted);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+}
+.hoja-handle .hoja-handle-grip { cursor: grab; letter-spacing: -3px; padding-right: 5px; font-size: 13px; }
+.hoja-handle button:hover, .hoja-handle button:focus-visible { background: var(--hoja-hover); color: var(--hoja-fg); }
+.hoja-handle button:focus-visible, .hoja-menu-item:focus-visible, .hoja-fold-pill:focus-visible { outline: 2px solid var(--hoja-accent); outline-offset: 1px; }
+.hoja-handle .hoja-handle-fold { font-size: 12px; }
+html.hoja-dragging, html.hoja-dragging * { cursor: grabbing !important; user-select: none; }
+
+.hoja-drop {
+  position: fixed;
+  z-index: 61;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--hoja-accent);
+  opacity: 0.8;
+  pointer-events: none;
+}
+
+.hoja-folds { position: static; }
+.hoja-fold-pill {
+  position: fixed;
+  z-index: 59;
+  height: 20px;
+  padding: 0 7px;
+  font-size: 11px;
+  border: 1px solid var(--hoja-border);
+  background: var(--hoja-bg);
+}
+
+.hoja-menu {
+  position: fixed;
+  z-index: 70;
+  box-sizing: border-box;
+  min-width: 220px;
+  max-width: 300px;
+  max-height: min(440px, 70vh);
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--hoja-border);
+  border-radius: 8px;
+  background: var(--hoja-bg);
+  color: var(--hoja-fg);
+  box-shadow: var(--hoja-shadow);
+}
+.hoja-menu-search {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0 0 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--hoja-border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  outline: none;
+}
+.hoja-menu-search:focus { border-color: var(--hoja-accent); }
+.hoja-menu-item {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.hoja-menu-item:hover, .hoja-menu-item.is-active { background: var(--hoja-hover); }
+.hoja-menu-item[disabled] { opacity: 0.45; cursor: default; }
+.hoja-menu-item.is-danger { color: var(--hoja-danger); }
+.hoja-menu-item.is-ai .hoja-menu-label::before { content: '✦ '; color: var(--hoja-accent); }
+.hoja-menu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hoja-menu-more, .hoja-menu-hint { color: var(--hoja-muted); font-size: 12px; }
+.hoja-menu-hint { order: -1; min-width: 22px; text-align: center; font-weight: 600; }
+.hoja-menu-sep { height: 1px; margin: 4px 2px; background: var(--hoja-border); }
+.hoja-menu-group { margin: 6px 8px 2px; color: var(--hoja-muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.hoja-menu-empty { margin: 8px; color: var(--hoja-muted); }
+
+/* Host blocks */
+.hoja-host [data-hoja-block] { position: relative; border-radius: 4px; transition: background-color 120ms; }
+.hoja-host [data-hoja-block][data-hoja-selected] { background: var(--hoja-host-selected, rgba(35, 131, 226, 0.12)); }
+.hoja-host [data-hoja-block][data-hoja-drag-source] { opacity: 0.4; }
+.hoja-host [data-hoja-folded] { display: none !important; }
+.hoja-host [data-hoja-collapsed] { opacity: 0.9; }
+
+/* Print: only the printed document, without chrome. */
+@media print {
+  html.hoja-printing body * { visibility: hidden !important; }
+  html.hoja-printing .hoja-print-target, html.hoja-printing .hoja-print-target * { visibility: visible !important; }
+  html.hoja-printing .hoja-print-target { position: absolute; inset: 0 auto auto 0; width: 100%; }
+  html.hoja-printing .hoja-print-target [data-hoja-folded] { display: block !important; }
+  .hoja-layer, [data-hoja-slash-layer] { display: none !important; }
+}
