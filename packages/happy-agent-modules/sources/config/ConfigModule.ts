@@ -3708,6 +3708,19 @@ export class ConfigModule implements AgentModule {
     }
 
     /**
+     * GHO-196 — the Orkest project session seam (the dashboard's session tools API and proposal route):
+     * `ORKEST_SESSION_URL` (the dashboard's local origin) and this worker's own token from
+     * `ORKEST_WORKER_TOKEN_FILE`. `undefined` unless the agency is configured with a worker token: the seam
+     * checks every call against the run this worker holds, so there is nothing to call without one.
+     */
+    get orkestSession(): { url: string; workerToken: string } | undefined {
+        const agency = this.orkestAgency;
+        const url = this.#environmentValue("ORKEST_SESSION_URL")?.trim();
+        if (!agency?.workerToken || !url || url.length > MAX_CONFIG_STRING_LENGTH) return undefined;
+        return { url: url.replace(/\/+$/, ""), workerToken: agency.workerToken };
+    }
+
+    /**
      * The optional discovery ceiling for unattended Git reads.
      *
      * A hermetic installation can live beneath another repository while treating its own project
