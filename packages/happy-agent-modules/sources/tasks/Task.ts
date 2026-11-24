@@ -122,6 +122,13 @@ export const createTaskInputSchema = Type.Object(
         text: Type.Optional(Type.String({ minLength: 1, maxLength: 100_000 })),
         /** What the task's conversation runs on: seeds an idle draft, or delivered with opening text. */
         mode: Type.Optional(messageModeSchema),
+        /**
+         * Where the agent starts. Absolute: an existing directory (a project's repository). Relative: a folder
+         * inside the task's own folder, made empty. Omitted, the agent starts in the task folder.
+         */
+        workingDirectory: Type.Optional(Type.String({ minLength: 1, maxLength: 4_096 })),
+        /** The Orkest project the task belongs to, kept in the agent's metadata. */
+        projectId: Type.Optional(Type.String({ minLength: 1, maxLength: 80 })),
     },
     { additionalProperties: false },
 );

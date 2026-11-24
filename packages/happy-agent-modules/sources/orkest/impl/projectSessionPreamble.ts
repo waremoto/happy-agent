@@ -20,6 +20,8 @@ export interface ProjectSessionPreambleInput {
     readonly focus?: { readonly path: string; readonly rev: string; readonly text: string };
     /** How many docs the project has; `null` when it has no repository Orkest can read. */
     readonly docs: number | null;
+    /** Where the agent starts (GHO-204): the project's repository, or null for the empty project folder. */
+    readonly workingDirectory?: { readonly repoPath: string | null; readonly taskPath: string };
 }
 
 export const SESSION_TOOL_NAMES = [

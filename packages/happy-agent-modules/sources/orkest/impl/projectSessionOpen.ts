@@ -17,6 +17,8 @@ export interface ProjectSessionState {
     readonly title: string;
     readonly permissionMode: string;
     readonly taskPath: string;
+    /** The repository the agent starts in (GHO-204); null when it starts in the empty project folder. */
+    readonly repoPath: string | null;
     focus?: { readonly path: string; readonly rev: string; readonly text: string };
     /** Docs the project has; `null` when it has no repository Orkest can read. */
     docs: number | null;
@@ -34,6 +36,7 @@ export function isProjectSession(
 export function projectSessionState(
     session: AttendedSession & { scope: NonNullable<AttendedSession["scope"]> },
     taskPath: string,
+    _repoPath: string | null = null,
 ): ProjectSessionState {
     return {
         scope: {
@@ -44,6 +47,7 @@ export function projectSessionState(
         title: session.title,
         permissionMode: session.permissionMode,
         taskPath,
+        repoPath: null,
         docs: null,
     };
 }

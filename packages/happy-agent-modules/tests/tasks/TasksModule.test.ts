@@ -1,4 +1,5 @@
-import { rm, stat } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import {
@@ -322,6 +323,53 @@ describe("TasksModule", () => {
                 (await fixture.tasks.list(fixture.database.context)).map((task) => task.id),
             ).toEqual([first.id, second.id]);
         } finally {
+            await fixture.close();
+        }
+    });
+
+    it("opens a task in an explicit working directory, or in an empty folder inside its own (GHO-204)", async () => {
+        const fixture = await started("tasks-working-directory");
+        const repo = await mkdtemp(join(tmpdir(), "task-repo-"));
+        try {
+            const ctx = fixture.database.context;
+            const inRepo = await fixture.tasks.create(ctx, {
+                name: "Chat in the repository",
+                workingDirectory: repo,
+                projectId: "p-1",
+            });
+            // The task keeps its own folder (the agent's working copies go there); the agent starts in the repository.
+            expect(inRepo.path).toBe(join(fixture.config.tasksHome, "chat_in_the_repository"));
+            const repoAgent = fixture.agents.configs.get(inRepo.agentId);
+            expect(repoAgent?.environment?.workingDirectory).toBe(repo);
+            expect(repoAgent?.modules?.["compute"]).toMatchObject({ cwd: repo });
+            expect(repoAgent?.metadata?.["orkestProjectId"]).toBe("p-1");
+
+            const bare = await fixture.tasks.create(ctx, {
+                name: "Chat with no repository",
+                workingDirectory: "project",
+                projectId: "p-2",
+            });
+            const empty = join(bare.path, "project");
+            expect(fixture.agents.configs.get(bare.agentId)?.environment?.workingDirectory).toBe(
+                empty,
+            );
+            expect((await stat(empty)).isDirectory()).toBe(true);
+
+            // A task made as before still starts in its own folder, and carries no project.
+            const plain = await fixture.tasks.create(ctx, { name: "Plain task" });
+            const plainAgent = fixture.agents.configs.get(plain.agentId);
+            expect(plainAgent?.environment?.workingDirectory).toBe(plain.path);
+            expect(plainAgent?.metadata?.["orkestProjectId"]).toBeUndefined();
+
+            // A directory that is not there is refused, never made.
+            await expect(
+                fixture.tasks.create(ctx, {
+                    name: "Missing repository",
+                    workingDirectory: join(repo, "missing"),
+                }),
+            ).rejects.toBeInstanceOf(TaskInputError);
+        } finally {
+            await rm(repo, { recursive: true, force: true });
             await fixture.close();
         }
     });
