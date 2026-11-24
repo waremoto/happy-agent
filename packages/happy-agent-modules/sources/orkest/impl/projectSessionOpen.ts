@@ -27,16 +27,22 @@ export interface ProjectSessionState {
 export const ROADMAP_PATH = "docs/ROADMAP.md";
 
 /** A project or doc session this Happy worker owns: a scope and backend `happy` (GHO-195). */
-export function isProjectSession(
-    session: AttendedSession,
-): session is AttendedSession & { scope: NonNullable<AttendedSession["scope"]> } {
-    return session.scope !== undefined && (session.backend ?? "happy") === "happy";
+export function isProjectSession(session: AttendedSession): session is AttendedSession & {
+    scope: NonNullable<AttendedSession["scope"]> & { kind: "project" | "doc" };
+} {
+    // GHO-204: a ticket session's scope only names its project; it is still opened as a work item.
+    return (
+        (session.scope?.kind === "project" || session.scope?.kind === "doc") &&
+        (session.backend ?? "happy") === "happy"
+    );
 }
 
 export function projectSessionState(
-    session: AttendedSession & { scope: NonNullable<AttendedSession["scope"]> },
+    session: AttendedSession & {
+        scope: NonNullable<AttendedSession["scope"]> & { kind: "project" | "doc" };
+    },
     taskPath: string,
-    _repoPath: string | null = null,
+    repoPath: string | null = null,
 ): ProjectSessionState {
     return {
         scope: {
@@ -47,7 +53,7 @@ export function projectSessionState(
         title: session.title,
         permissionMode: session.permissionMode,
         taskPath,
-        repoPath: null,
+        repoPath,
         docs: null,
     };
 }

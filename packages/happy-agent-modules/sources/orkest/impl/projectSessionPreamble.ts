@@ -54,6 +54,14 @@ export function projectSessionPreamble(input: ProjectSessionPreambleInput): stri
         `Read Orkest through your tools (${SESSION_TOOL_NAMES.join(", ")}); never guess what a doc, ticket or run says. Every read is made as the person who opened this session and stays inside this project.`,
         "Status is never evidence: a ticket, tracker or roadmap node is done only with something a person can open (a commit, a receipt, a promoted tracker). You never approve, accept, merge, start runs or change settings; when something waits for the person, say what and why.",
     );
+    if (input.workingDirectory) {
+        const { repoPath, taskPath } = input.workingDirectory;
+        lines.push(
+            repoPath === null
+                ? `This project has no repository on this host, so you start in an empty folder, ${taskPath}/project. Your only writable place is ${taskPath}/doc; propose doc changes with propose_document.`
+                : `You start in the project's repository at ${repoPath}. Read it freely. Never write, delete or run commands that change files there. Your only writable place is ${taskPath}/doc; propose doc changes with propose_document.`,
+        );
+    }
     if (input.docs === null) {
         lines.push(
             "This project has no docs yet: it has no repository Orkest can read, so the doc tools answer an empty list. Work from its tickets and runs (list_tickets, read_ticket, list_runs, read_run) and answer in the chat. When the person wants a plan written down, say that the project needs a repository first.",

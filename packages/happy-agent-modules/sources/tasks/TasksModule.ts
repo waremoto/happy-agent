@@ -1,5 +1,5 @@
 import { AsyncResource } from "node:async_hooks";
-import { basename } from "node:path";
+import { basename, posix, win32 } from "node:path";
 
 import { createId } from "@paralleldrive/cuid2";
 import {
@@ -675,11 +675,29 @@ export class TasksModule implements AgentModule {
             const runnerId = this.#runners.enabled ? this.#runners.defaultRunnerId : undefined;
             const path = this.#taskPath(runnerId, folderName);
             const now = Date.now();
+            // GHO-204: where the agent starts. An absolute directory (a project's repository) must exist and is never
+            // made; a relative one is a folder inside the task's own folder, made empty.
+            const requestedDirectory = input.workingDirectory;
+            const relativeDirectory =
+                requestedDirectory !== undefined && !isAbsolutePath(requestedDirectory);
+            if (
+                requestedDirectory !== undefined &&
+                relativeDirectory &&
+                requestedDirectory.replaceAll("\\", "/").split("/").includes("..")
+            ) {
+                throw new TaskInputError("A working directory inside a task cannot leave it.");
+            }
+            const workingDirectory =
+                requestedDirectory === undefined
+                    ? path
+                    : relativeDirectory
+                      ? joinTaskPath(path, requestedDirectory)
+                      : requestedDirectory;
             const config: AgentConfig = {
                 provenance: { createdAt: now },
                 environment: {
                     ...currentAgentEnvironment(),
-                    workingDirectory: path,
+                    workingDirectory,
                 },
                 // A task's conversation is the task, so it is called what the task is called
                 // and chat naming never writes over it; an unnamed task names both itself.
@@ -687,6 +705,7 @@ export class TasksModule implements AgentModule {
                     title: name,
                     updatedAt: now,
                     version: 1,
+                    ...(input.projectId === undefined ? {} : { orkestProjectId: input.projectId }),
                     ...(input.mode !== undefined && input.text === undefined
                         ? {
                               initialMode: input.mode,
@@ -708,7 +727,7 @@ export class TasksModule implements AgentModule {
                 },
                 modules: {
                     compute: {
-                        cwd: path,
+                        cwd: workingDirectory,
                         ...(runnerId === undefined ? {} : { runnerId }),
                         secretScope: { workspaceId },
                     },
@@ -755,6 +774,21 @@ export class TasksModule implements AgentModule {
                 throw new TaskConflictError("The task folder path is already in use.");
             }
             await machine.fs.mkdir(PRODUCT, path, { recursive: true });
+            if (requestedDirectory !== undefined) {
+                if (relativeDirectory) {
+                    await machine.fs.mkdir(PRODUCT, workingDirectory, { recursive: true });
+                } else {
+                    const directory = await machine.fs
+                        .stat(PRODUCT, workingDirectory)
+                        .catch((error: NodeJS.ErrnoException) => {
+                            if (error.code === "ENOENT") return undefined;
+                            throw error;
+                        });
+                    if (directory === undefined || !directory.isDirectory) {
+                        throw new TaskInputError("The working directory is not a directory.");
+                    }
+                }
+            }
             if (input.text !== undefined && input.creatorAgentId !== undefined) {
                 // The agent ID doubles as the opening message's identity: it is new, and it is
                 // never reused, so the opening is delivered exactly once with the task.
@@ -1177,6 +1211,17 @@ export class TasksModule implements AgentModule {
  * task from another agent, without the sender line it adds. Media and model-only blocks are left
  * out, and system or service messages name nothing.
  */
+/** An absolute path under either platform's rules: a drive letter, a UNC prefix or a leading slash. */
+function isAbsolutePath(path: string): boolean {
+    return posix.isAbsolute(path) || win32.isAbsolute(path);
+}
+
+/** A folder inside a task's own folder, joined with the separators the task's path already uses. */
+function joinTaskPath(taskPath: string, relative: string): string {
+    const rules = taskPath.includes("\\") || /^[A-Za-z]:/.test(taskPath) ? win32 : posix;
+    return rules.join(taskPath, relative);
+}
+
 function namingText(accepted: AgentBaseAcceptedMessage, task: TaskRecord): string {
     const delivered = accepted.metadata?.["tasks"];
     const fromAgent =

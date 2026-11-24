@@ -26,14 +26,27 @@ export const attendedSessionSchema = Type.Object({
     fence: Type.Number(),
     /** Present only for a session opened from a handoff; read leniently by `readHandoffContinuation`. */
     continuation: Type.Optional(Type.Unknown()),
-    /** GHO-195/196 — present only on a project or doc session (no ticket). */
+    /**
+     * GHO-195/196 — on a project or doc session; GHO-204 adds `ticket` for a ticket session of a project, and
+     * `repoPath`: where the project's repository is on the worker's host (null when it has none). Every field
+     * after `kind` is additive, and an old row has no scope at all.
+     */
     scope: Type.Optional(
         Type.Object({
-            kind: Type.Union([Type.Literal("project"), Type.Literal("doc")]),
+            kind: Type.Union([
+                Type.Literal("project"),
+                Type.Literal("doc"),
+                Type.Literal("ticket"),
+            ]),
             projectId: Type.String({ minLength: 1, maxLength: 80 }),
             path: Type.Optional(Type.Union([Type.String({ maxLength: 300 }), Type.Null()])),
+            repoPath: Type.Optional(Type.Union([Type.String({ maxLength: 4_096 }), Type.Null()])),
         }),
     ),
+    /** GHO-204 — the project every session belongs to; absent on an old ticket row. */
+    projectId: Type.Optional(Type.Union([Type.String({ maxLength: 80 }), Type.Null()])),
+    /** GHO-204 — the project's title when Father names it, for the task's display name; Father does not send it yet. */
+    projectTitle: Type.Optional(Type.Union([Type.String({ maxLength: 200 }), Type.Null()])),
     /** GHO-195 — `happy` or `librechat`; present only on a project or doc session. */
     backend: Type.Optional(Type.String()),
     startedBy: Type.Optional(Type.Unknown()),

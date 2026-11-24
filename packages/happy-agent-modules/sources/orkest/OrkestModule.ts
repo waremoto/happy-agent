@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import { createHash, randomUUID } from "node:crypto";
+import { stat } from "node:fs/promises";
 
 import {
     defineAgentTool,
@@ -24,6 +25,13 @@ import {
     type OrkestAgencyEndpoint,
 } from "./impl/OrkestAgencyClient.js";
 import { attendedToolScope } from "./impl/attendedToolScope.js";
+import {
+    placementFor,
+    repoWriteRefusal,
+    sessionProjectId,
+    sessionRepoPath,
+    taskNameFor,
+} from "./impl/chatByProject.js";
 import { claudeSessionIdFor } from "./impl/claudeSessionId.js";
 import { handoffContinuationText, readHandoffContinuation } from "./impl/handoffContinuation.js";
 import { OrkestSessionClient, type OrkestSessionCall } from "./impl/OrkestSessionClient.js";
@@ -61,6 +69,19 @@ interface OpenSession {
     project?: ProjectSessionState;
     /** The model the session opened with, when the agent scope names none. */
     openingModel?: string;
+    /**
+     * GHO-204 — set when the agent starts in the project's repository: it may read there and never write
+     * (`cwd` is where its relative paths resolve).
+     */
+    repoGuard?: { readonly repoPath: string; readonly cwd: string };
+}
+
+async function isDirectory(path: string): Promise<boolean> {
+    try {
+        return (await stat(path)).isDirectory();
+    } catch {
+        return false;
+    }
 }
 
 /**
@@ -111,7 +132,25 @@ export class OrkestModule implements AgentModule {
                     permissionMode: p.permissionMode,
                     ...(p.focus === undefined ? {} : { focus: p.focus }),
                     docs: p.docs,
+                    // GHO-204 (D-33): where the agent starts, and the one place it may write.
+                    workingDirectory: { repoPath: p.repoPath, taskPath: p.taskPath },
                 });
+            },
+            // GHO-204 (D-33): a session that starts in the project's repository reads there and never writes there,
+            // even in workspace_write; only the task's doc folder is writable.
+            beforeToolCall: (_ctx, scope, call) => {
+                const guard = [...this.#open.values()].find(
+                    (s) => s.agentId === scope.agent.id,
+                )?.repoGuard;
+                if (guard === undefined) return undefined;
+                const reason = repoWriteRefusal({
+                    ...guard,
+                    tool: call.tool.name,
+                    args: call.arguments,
+                });
+                return reason === undefined
+                    ? undefined
+                    : { type: "answer", content: [{ type: "text", text: reason }], isError: true };
             },
             tools: (_ctx, scope) => {
                 const endpoint = this.#config.orkestAgency;
@@ -341,7 +380,10 @@ export class OrkestModule implements AgentModule {
                             metadata:
                                 from === "person"
                                     ? USER_MESSAGE_ORIGIN_METADATA
-                                    : { ...AGENT_MESSAGE_ORIGIN_METADATA, ...senderAgentIdMetadata(open.agentId) },
+                                    : {
+                                          ...AGENT_MESSAGE_ORIGIN_METADATA,
+                                          ...senderAgentIdMetadata(open.agentId),
+                                      },
                         },
                     );
                     return acceptance.accepted === "created" || acceptance.accepted === "existing";
@@ -368,13 +410,20 @@ export class OrkestModule implements AgentModule {
             serviceTier: null,
             permissionMode: session.permissionMode,
         };
+        // GHO-204 (D-33): a session of a project opens at the project's path: its repository when Father names one
+        // that exists on this host, else an empty folder inside the task's own. A row with no project opens as before.
+        const projectId = sessionProjectId(session);
+        const placement = await placementFor(sessionRepoPath(session), isDirectory);
         // Identities derived from the run: a repeated delivery finds the same task.
         const task = await this.#tasks.create(ctx, {
             id: derivedId("t", session.runId),
             workspaceId: derivedId("w", session.runId),
             agentId: derivedId("a", session.runId),
-            name: session.title.slice(0, 120),
+            name: taskNameFor(session.title, session.projectTitle),
             mode,
+            ...(projectId === undefined
+                ? {}
+                : { projectId, workingDirectory: placement.workingDirectory }),
         });
         // A project or doc session has no work item to draft: the person's first message is theirs (GHO-196).
         if (!isProjectSession(session)) await this.#draft(ctx, task.agentId, mode, session);
@@ -397,7 +446,10 @@ export class OrkestModule implements AgentModule {
             lastHeartbeat: Date.now(),
             openingModel: modelId,
             ...(isProjectSession(session)
-                ? { project: projectSessionState(session, task.path) }
+                ? { project: projectSessionState(session, task.path, placement.repoPath) }
+                : {}),
+            ...(projectId !== undefined && placement.repoPath !== null
+                ? { repoGuard: { repoPath: placement.repoPath, cwd: placement.repoPath } }
                 : {}),
         };
         this.#open.set(session.runId, opened);
@@ -435,9 +487,11 @@ export class OrkestModule implements AgentModule {
         const lease = await agency.claim(session.runId, workerId, LEASE_SECONDS);
         if (lease === undefined) return undefined;
         let project: ProjectSessionState | undefined;
+        const placement = await placementFor(sessionRepoPath(session), isDirectory);
         if (isProjectSession(session) && ctx !== undefined) {
             const task = await this.#tasks.get(ctx, session.ownerJobRef);
-            if (task !== undefined) project = projectSessionState(session, task.path);
+            if (task !== undefined)
+                project = projectSessionState(session, task.path, placement.repoPath);
         }
         const open: OpenSession = {
             runId: session.runId,
@@ -449,6 +503,9 @@ export class OrkestModule implements AgentModule {
                 ? {}
                 : { openingModel: HARNESS_MODELS[session.harness] }),
             ...(project === undefined ? {} : { project }),
+            ...(sessionProjectId(session) !== undefined && placement.repoPath !== null
+                ? { repoGuard: { repoPath: placement.repoPath, cwd: placement.repoPath } }
+                : {}),
         };
         this.#open.set(session.runId, open);
         await this.#openProject(open);

@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server } from "node:http";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { AgentProviders, withAgentDatabase } from "@slopus/happy-agent-base";
@@ -81,11 +81,15 @@ async function listen(
 }
 
 /** Father: one project session (backend happy) waiting for its owner. */
-async function fakeFather(scope: {
-    kind: "project" | "doc";
-    projectId: string;
-    path: string | null;
-}) {
+async function fakeFather(
+    scope: {
+        kind: "project" | "doc" | "ticket";
+        projectId: string;
+        path: string | null;
+        repoPath?: string | null;
+    },
+    extra: Record<string, unknown> = {},
+) {
     const run = {
         runId: RUN,
         state: "admitted",
@@ -101,6 +105,7 @@ async function fakeFather(scope: {
         scope,
         backend: "happy",
         startedBy: { provider: "ghostshell", id: "syn-person" },
+        ...extra,
     };
     let intent: "pending" | "acknowledged" = "pending";
     const father = await listen((path, body) => {
@@ -460,4 +465,97 @@ describe("Orkest project session tools on Happy (GHO-196.2.2)", () => {
             .toBe(true);
         expect(await readFile(copy(task.path), "utf8")).toBe(ROADMAP);
     }, 90_000);
+
+    // GHO-204 (ORKEST-CHAT-BY-PROJECT, D-33)
+    it("opens at the project's repository, tells the agent, and refuses a write there", async () => {
+        const repo = await mkdtemp(join(inject("orkestFixtureRoot"), "repo-"));
+        await writeFile(join(repo, "README.md"), "# repo\n");
+        const father = await fakeFather({ ...SCOPE, repoPath: repo });
+        const dashboard = await fakeDashboard();
+        const patch = (path: string) =>
+            `*** Begin Patch\n*** Add File: ${path}\n+hello\n*** End Patch`;
+        const { runtime, provider } = await happy(father.url, dashboard.url, [
+            toolTurn("c1", "apply_patch", { patch: patch(join(repo, "new.txt")) }),
+            textTurn("Refused."),
+        ]);
+        const task = await openTask(runtime, father);
+
+        const config = await runtime.system.config(dbCtx(runtime), derivedId("a", RUN));
+        expect(config?.environment?.workingDirectory).toBe(repo);
+        expect(config?.metadata?.["orkestProjectId"]).toBe(PROJECT);
+        // The task keeps its own folder for the working copies.
+        await expect
+            .poll(async () => readFile(copy(task.path), "utf8").catch(() => ""), {
+                timeout: 10_000,
+            })
+            .toBe(ROADMAP);
+
+        await say(runtime, "Add a file.", "m1");
+        await expect.poll(() => toolResults(provider), { timeout: 20_000 }).toMatch(/repository/);
+        await expect(stat(join(repo, "new.txt"))).rejects.toThrow();
+        const instructions = provider.sessions[0]!.options.instructions;
+        expect(instructions).toContain(
+            `You start in the project's repository at ${repo}. Read it freely.`,
+        );
+        expect(instructions).toContain(`${task.path}/doc`);
+    }, 90_000);
+
+    it("opens an empty project folder when the project has no repository on this host", async () => {
+        const father = await fakeFather({
+            ...SCOPE,
+            repoPath: join(tmpdirFor(), "not-on-this-host"),
+        });
+        const dashboard = await fakeDashboard();
+        const { runtime, provider } = await happy(father.url, dashboard.url, [
+            textTurn("Read it."),
+        ]);
+        const task = await openTask(runtime, father);
+
+        const config = await runtime.system.config(dbCtx(runtime), derivedId("a", RUN));
+        expect(config?.environment?.workingDirectory).toBe(join(task.path, "project"));
+        expect((await stat(join(task.path, "project"))).isDirectory()).toBe(true);
+        await say(runtime, "Where are we?", "m1");
+        await expect.poll(() => requests(provider).length, { timeout: 20_000 }).toBeGreaterThan(0);
+        expect(provider.sessions[0]!.options.instructions).toContain(`${task.path}/project`);
+    }, 90_000);
+
+    it("starts a ticket session of a project in its repository and still drafts the work item", async () => {
+        const repo = await mkdtemp(join(inject("orkestFixtureRoot"), "repo-"));
+        const father = await fakeFather(
+            { kind: "ticket", projectId: PROJECT, path: null, repoPath: repo },
+            {
+                projectId: PROJECT,
+                workLabel: "SYN-7",
+                title: "SYN-7: Tighten login",
+                brief: "The brief.",
+            },
+        );
+        const { runtime } = await happy(father.url, "http://127.0.0.1:9");
+        await openTask(runtime, father);
+        const config = await runtime.system.config(dbCtx(runtime), derivedId("a", RUN));
+        expect(config?.environment?.workingDirectory).toBe(repo);
+        expect(config?.metadata?.["orkestProjectId"]).toBe(PROJECT);
+        // A ticket session is not a project session: its composer is drafted with the work item.
+        expect((config?.metadata?.["draft"] as { text?: string } | undefined)?.text).toContain(
+            "SYN-7: Tighten login",
+        );
+    }, 90_000);
+
+    it("starts an old ticket row, with no project, in its own task folder as before", async () => {
+        const father = await fakeFather(SCOPE, {
+            scope: undefined,
+            workLabel: "SYN-8",
+            title: "SYN-8: Old row",
+            brief: "Old.",
+        });
+        const { runtime } = await happy(father.url, "http://127.0.0.1:9");
+        const task = await openTask(runtime, father);
+        const config = await runtime.system.config(dbCtx(runtime), derivedId("a", RUN));
+        expect(config?.environment?.workingDirectory).toBe(task.path);
+        expect(config?.metadata?.["orkestProjectId"]).toBeUndefined();
+    }, 90_000);
 });
+
+function tmpdirFor(): string {
+    return inject("orkestFixtureRoot");
+}

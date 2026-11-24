@@ -180,7 +180,7 @@ describe("the write scope", () => {
         // Dot segments cannot climb out of the task folder into the repository.
         expect(
             refused("Write", {
-                file_path: `${TASK}/doc/../../../../../../../../ware/Ghost/x.md`,
+                file_path: "D:/ware/_tasks/t_1/doc/../../../Ghost/x.md",
                 content: "x",
             }),
         ).toBeDefined();
