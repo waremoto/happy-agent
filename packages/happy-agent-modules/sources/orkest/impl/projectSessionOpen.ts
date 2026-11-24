@@ -1,4 +1,5 @@
 import type { AttendedSession } from "./OrkestAgencyClient.js";
+import { contextSetOf, type ContextFile } from "./projectSessionContext.js";
 import { mainDocOpenPath } from "./projectSessionMainDoc.js";
 import type { OrkestSessionCall, OrkestSessionClient } from "./OrkestSessionClient.js";
 import {
@@ -23,6 +24,8 @@ export interface ProjectSessionState {
     focus?: { readonly path: string; readonly rev: string; readonly text: string };
     /** Docs the project has; `null` when it has no repository Orkest can read. */
     docs: number | null;
+    /** GHO-205.6.1 — the context set the dashboard sent at open (D-42). */
+    context?: readonly ContextFile[];
 }
 
 export const ROADMAP_PATH = "docs/ROADMAP.md";
@@ -90,10 +93,14 @@ export async function openProjectSession(
     if (state.docs === null) return undefined;
     // GHO-205.3.2: the doc a project session opens on is the one the `focus` tool names (the person's choice, else
     // ROADMAP, README, CONTEXT); an older dashboard has no such tool and the same order applies here.
+    // GHO-205.6.1: the same call asks for the context set (an older dashboard ignores `context`).
+    const answer = await client.tool("focus", call, { context: true }).catch(() => null);
+    const context = contextSetOf(answer);
+    if (context) state.context = context;
     const focus =
         state.scope.kind === "doc" && state.scope.path
             ? state.scope.path
-            : mainDocOpenPath(await client.tool("focus", call, {}).catch(() => null), paths);
+            : mainDocOpenPath(answer, paths);
     if (focus === undefined || !isDocPath(focus)) return undefined;
     const base = await baseFor(state.taskPath, focus);
     const copy = await readWorkingCopy(state.taskPath, focus);

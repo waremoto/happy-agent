@@ -1,4 +1,5 @@
 import { documentContract, documentOutline } from "../hoja/assist/index.mjs";
+import { contextSection, type ContextFile } from "./projectSessionContext.js";
 
 /**
  * GHO-196 — what a Happy project or doc session's agent is told, as its instructions (not a composer draft, so the
@@ -22,6 +23,8 @@ export interface ProjectSessionPreambleInput {
     readonly docs: number | null;
     /** Where the agent starts (GHO-204): the project's repository, or null for the empty project folder. */
     readonly workingDirectory?: { readonly repoPath: string | null; readonly taskPath: string };
+    /** GHO-205.6.1 — the context set read at open (D-42). */
+    readonly context?: readonly ContextFile[];
 }
 
 export const SESSION_TOOL_NAMES = [
@@ -75,6 +78,7 @@ export function projectSessionPreamble(input: ProjectSessionPreambleInput): stri
     lines.push(
         "read_doc(path) also writes that doc's working copy into your task folder (docs/<name>.md becomes doc/<name>.md), the only place you write. propose_document(path, why) sends that whole working copy; it changes nothing until the person accepts it on the Board. If it answers that the doc moved, the working copy now holds the current text: apply your change again and call it again.",
     );
+    if (input.context && input.context.length > 0) lines.push(contextSection(input.context));
     if (input.focus) {
         const reference = {
             path: input.focus.path,

@@ -141,6 +141,8 @@ export class OrkestModule implements AgentModule {
                     docs: p.docs,
                     // GHO-204 (D-33): where the agent starts, and the one place it may write.
                     workingDirectory: { repoPath: p.repoPath, taskPath: p.taskPath },
+                    // GHO-205.6.1 (D-42): the context set read at open.
+                    ...(p.context === undefined ? {} : { context: p.context }),
                 });
             },
             // GHO-205.3.2 (D-46): before every turn the session asks for its main doc; when it moved, or the person
