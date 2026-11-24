@@ -1,4 +1,5 @@
 import type { AttendedSession } from "./OrkestAgencyClient.js";
+import { mainDocOpenPath } from "./projectSessionMainDoc.js";
 import type { OrkestSessionCall, OrkestSessionClient } from "./OrkestSessionClient.js";
 import {
     baseFor,
@@ -87,12 +88,12 @@ export async function openProjectSession(
         return `list_docs answered ${listed.status} ${listed.error}`;
     }
     if (state.docs === null) return undefined;
+    // GHO-205.3.2: the doc a project session opens on is the one the `focus` tool names (the person's choice, else
+    // ROADMAP, README, CONTEXT); an older dashboard has no such tool and the same order applies here.
     const focus =
         state.scope.kind === "doc" && state.scope.path
             ? state.scope.path
-            : paths.includes(ROADMAP_PATH)
-              ? ROADMAP_PATH
-              : undefined;
+            : mainDocOpenPath(await client.tool("focus", call, {}).catch(() => null), paths);
     if (focus === undefined || !isDocPath(focus)) return undefined;
     const base = await baseFor(state.taskPath, focus);
     const copy = await readWorkingCopy(state.taskPath, focus);

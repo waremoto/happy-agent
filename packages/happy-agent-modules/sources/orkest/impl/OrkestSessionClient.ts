@@ -66,6 +66,8 @@ export const ORKEST_SESSION_TOOLS = [
     "read_notes",
     "ack_notes",
     "reconcile_roadmap",
+    // GHO-205.3.2: the session's main doc, asked before every turn (an older dashboard answers 404).
+    "focus",
 ] as const;
 export type OrkestSessionToolName = (typeof ORKEST_SESSION_TOOLS)[number];
 

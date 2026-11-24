@@ -42,6 +42,7 @@ import {
     type ProjectSessionState,
 } from "./impl/projectSessionOpen.js";
 import { projectSessionPreamble } from "./impl/projectSessionPreamble.js";
+import { MAIN_DOC_SEEN_KEY, mainDocTurn, type MainDocSeen } from "./impl/projectSessionMainDoc.js";
 import { projectSessionTools } from "./impl/projectSessionTools.js";
 import { deliverProjectSessionNotes } from "./impl/projectSessionNotes.js";
 
@@ -141,6 +142,39 @@ export class OrkestModule implements AgentModule {
                     // GHO-204 (D-33): where the agent starts, and the one place it may write.
                     workingDirectory: { repoPath: p.repoPath, taskPath: p.taskPath },
                 });
+            },
+            // GHO-205.3.2 (D-46): before every turn the session asks for its main doc; when it moved, or the person
+            // chose another doc, the agent gets one hidden notice with what changed and the text now.
+            beforeTurn: async (ctx, scope) => {
+                const session = [...this.#open.values()].find((s) => s.agentId === scope.agent.id);
+                const seam = this.#config.orkestSession;
+                if (!session?.project || !this.#config.attendedOnly || seam === undefined)
+                    return undefined;
+                const call = this.#sessionCall(session);
+                if (call === undefined) return undefined;
+                const opened = session.project.focus;
+                const note = await mainDocTurn({
+                    tool: (name, c, args) => new OrkestSessionClient(seam).tool(name, c, args),
+                    call,
+                    read: async () => {
+                        const v = (await scope.kv.read(ctx, MAIN_DOC_SEEN_KEY)) as
+                            | Partial<MainDocSeen>
+                            | undefined;
+                        if (typeof v?.path === "string" && typeof v.rev === "string")
+                            return { path: v.path, rev: v.rev };
+                        return opened ? { path: opened.path, rev: opened.rev } : undefined;
+                    },
+                    write: (seen) => scope.kv.write(ctx, MAIN_DOC_SEEN_KEY, seen),
+                });
+                if (note === null) return undefined;
+                return [
+                    {
+                        type: "steer",
+                        id: `orkest-main-doc-${randomUUID()}`,
+                        message: { role: "system", content: [{ type: "text", text: note }] },
+                        metadata: { hideFromUser: true },
+                    },
+                ];
             },
             // GHO-204 (D-33): a session that starts in the project's repository reads there and never writes there,
             // even in workspace_write; only the task's doc folder is writable.
