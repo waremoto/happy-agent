@@ -89,7 +89,14 @@ const FILE_WRITE_TOOLS = new Set([
 const PATH_KEYS = ["file_path", "path", "notebook_path"] as const;
 const PATCH_TOOLS = new Set(["apply_patch"]);
 /** Shell tools: the command's argument name and the directory argument's. */
-const SHELL_TOOLS = new Set(["Bash", "exec_command", "run_terminal_command", "shell", "bash"]);
+const SHELL_TOOLS = new Set([
+    "Bash",
+    "PowerShell",
+    "exec_command",
+    "run_terminal_command",
+    "shell",
+    "bash",
+]);
 const COMMAND_KEYS = ["command", "cmd"] as const;
 const CWD_KEYS = ["cwd", "workdir"] as const;
 

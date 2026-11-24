@@ -255,6 +255,9 @@ describe("the write scope", () => {
             expect(refused("Bash", { command }), command).toBeDefined();
         expect(refused("exec_command", { cmd: "rm -rf .", workdir: REPO })).toBeDefined();
         expect(refused("run_terminal_command", { command: "git clean -fd" })).toBeDefined();
+        // The Claude-vendor shell tool is named PowerShell on Windows.
+        expect(refused("PowerShell", { command: "echo x > notes.txt" })).toBeDefined();
+        expect(refused("PowerShell", { command: "Get-ChildItem" })).toBeUndefined();
         expect(refused("Bash", { command: "ls", cwd: REPO })).toBeUndefined();
         // A mutating command run from the task folder against the repo by path.
         expect(refused("Bash", { command: `rm ${REPO}/a.txt` }, TASK)).toBeDefined();

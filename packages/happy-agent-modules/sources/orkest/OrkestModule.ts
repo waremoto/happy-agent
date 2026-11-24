@@ -69,11 +69,12 @@ interface OpenSession {
     project?: ProjectSessionState;
     /** The model the session opened with, when the agent scope names none. */
     openingModel?: string;
-    /**
-     * GHO-204 — set when the agent starts in the project's repository: it may read there and never write
-     * (`cwd` is where its relative paths resolve).
-     */
-    repoGuard?: { readonly repoPath: string; readonly cwd: string };
+}
+
+/** Where an agent that starts in a project's repository may not write (`cwd` is where its relative paths resolve). */
+interface RepoGuard {
+    readonly repoPath: string;
+    readonly cwd: string;
 }
 
 async function isDirectory(path: string): Promise<boolean> {
@@ -102,6 +103,11 @@ export class OrkestModule implements AgentModule {
     readonly #config: ConfigModule;
     readonly #tasks: TasksModule;
     readonly #open = new Map<string, OpenSession>();
+    /**
+     * GHO-204 — the repository guard of each agent that starts in a project's repository, by agent id. It is set
+     * before the task exists, so no tool call of the agent can run before the guard does.
+     */
+    readonly #repoGuards = new Map<string, RepoGuard>();
     readonly #stop = new AbortController();
     #agents: AgentSystemRef | undefined;
     #loop: Promise<void> | undefined;
@@ -139,9 +145,7 @@ export class OrkestModule implements AgentModule {
             // GHO-204 (D-33): a session that starts in the project's repository reads there and never writes there,
             // even in workspace_write; only the task's doc folder is writable.
             beforeToolCall: (_ctx, scope, call) => {
-                const guard = [...this.#open.values()].find(
-                    (s) => s.agentId === scope.agent.id,
-                )?.repoGuard;
+                const guard = this.#repoGuards.get(scope.agent.id);
                 if (guard === undefined) return undefined;
                 const reason = repoWriteRefusal({
                     ...guard,
@@ -414,6 +418,11 @@ export class OrkestModule implements AgentModule {
         // that exists on this host, else an empty folder inside the task's own. A row with no project opens as before.
         const projectId = sessionProjectId(session);
         const placement = await placementFor(sessionRepoPath(session), isDirectory);
+        if (projectId !== undefined && placement.repoPath !== null)
+            this.#repoGuards.set(derivedId("a", session.runId), {
+                repoPath: placement.repoPath,
+                cwd: placement.repoPath,
+            });
         // Identities derived from the run: a repeated delivery finds the same task.
         const task = await this.#tasks.create(ctx, {
             id: derivedId("t", session.runId),
@@ -430,11 +439,13 @@ export class OrkestModule implements AgentModule {
         const ack = await agency.acknowledge(session.intentId, task.id);
         if (!ack.ok) {
             // Cancelled before it opened, or acknowledged as another task: nothing of ours runs.
+            this.#repoGuards.delete(task.agentId);
             if (ack.final) await this.#archive(ctx, task.id);
             return;
         }
         const lease = await agency.claim(session.runId, workerId, LEASE_SECONDS);
         if (lease === undefined) {
+            this.#repoGuards.delete(task.agentId);
             await this.#archive(ctx, task.id);
             return;
         }
@@ -447,9 +458,6 @@ export class OrkestModule implements AgentModule {
             openingModel: modelId,
             ...(isProjectSession(session)
                 ? { project: projectSessionState(session, task.path, placement.repoPath) }
-                : {}),
-            ...(projectId !== undefined && placement.repoPath !== null
-                ? { repoGuard: { repoPath: placement.repoPath, cwd: placement.repoPath } }
                 : {}),
         };
         this.#open.set(session.runId, opened);
@@ -503,10 +511,12 @@ export class OrkestModule implements AgentModule {
                 ? {}
                 : { openingModel: HARNESS_MODELS[session.harness] }),
             ...(project === undefined ? {} : { project }),
-            ...(sessionProjectId(session) !== undefined && placement.repoPath !== null
-                ? { repoGuard: { repoPath: placement.repoPath, cwd: placement.repoPath } }
-                : {}),
         };
+        if (sessionProjectId(session) !== undefined && placement.repoPath !== null)
+            this.#repoGuards.set(open.agentId, {
+                repoPath: placement.repoPath,
+                cwd: placement.repoPath,
+            });
         this.#open.set(session.runId, open);
         await this.#openProject(open);
         return open;
@@ -550,11 +560,13 @@ export class OrkestModule implements AgentModule {
         // One session consumed from the session budget, so usage is known.
         await agency.complete(open.runId, open.fence, reason);
         this.#open.delete(open.runId);
+        this.#repoGuards.delete(open.agentId);
     }
 
     async #drop(ctx: Context, open: OpenSession): Promise<void> {
         await this.#archive(ctx, open.taskId);
         this.#open.delete(open.runId);
+        this.#repoGuards.delete(open.agentId);
     }
 
     async #archive(ctx: Context, taskId: string): Promise<void> {
