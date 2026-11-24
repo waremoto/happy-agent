@@ -41,8 +41,40 @@ const MODE = {
     permissionMode: "read_only",
 } as const;
 /** The web tools a project session may use: Claude Code's own, or the provider's server tool. */
-const WEB_TOOL =
-    /"(?:name|toolName|tool)":"(?:WebSearch|WebFetch|web_search|web_fetch|claude_web_search)"/;
+const WEB_TOOLS = new Set([
+    "WebSearch",
+    "WebFetch",
+    "web_search",
+    "web_fetch",
+    "claude_web_search",
+    "codex_web_search",
+    "gemini_web_search",
+    "grok_web_search",
+    "bedrock_web_search",
+]);
+/**
+ * The web tools the agent called, from the stored tool_call blocks. Happy's own tools keep their name; the native
+ * Claude Code harness stores its built-ins as `other` with the tool in the arguments' title.
+ */
+function webCalls(value: unknown, out: string[] = []): string[] {
+    if (Array.isArray(value)) {
+        for (const item of value) webCalls(item, out);
+    } else if (value && typeof value === "object") {
+        const block = value as { type?: unknown; name?: unknown; arguments?: unknown };
+        if (block.type === "tool_call") {
+            let title: unknown;
+            try {
+                title = (JSON.parse(String(block.arguments ?? "{}")) as { title?: unknown }).title;
+            } catch {
+                title = undefined;
+            }
+            for (const name of [block.name, title])
+                if (typeof name === "string" && WEB_TOOLS.has(name)) out.push(name);
+        }
+        for (const child of Object.values(value)) webCalls(child, out);
+    }
+    return out;
+}
 /** The answer: the Node.js release schedule lives in the nodejs/release repository or on nodejs.org. */
 const ANSWER_URL = /https:\/\/(?:github\.com\/nodejs\/release|nodejs\.org)[^\s"\\)]*/;
 
@@ -173,10 +205,16 @@ describe.skipIf(!SPEC)("Orkest project session on Happy searches the web (GHO-20
             }
             const state = await stateText();
             reply = state.slice(-2500);
+            const near = (word: string) => {
+                const at = state.indexOf(word);
+                return at < 0
+                    ? `no ${word} in the state`
+                    : state.slice(Math.max(0, at - 200), at + 100);
+            };
             check(
                 "the agent ran a web tool (WebSearch, WebFetch or the provider's web search)",
-                WEB_TOOL.test(state),
-                state.slice(-400),
+                webCalls(JSON.parse(state)).length > 0,
+                near("WebSearch"),
             );
             check(
                 "the reply carries the release schedule's URL",
