@@ -100,40 +100,31 @@ describe.skipIf(!SPEC)("Orkest chat by project on Happy, live (GHO-204.4.1)", ()
             };
             for (const probe of Object.values(probes)) await rm(probe, { force: true });
 
-            // One message, five tool calls: a shell read, an update patch, an add patch, a shell redirect and a doc read.
-            const patch = (lines: string[]) =>
-                JSON.stringify({
-                    patch: ["*** Begin Patch", ...lines, "*** End Patch"].join("\n"),
-                });
+            // One message, five tool calls with the Claude-vendor tools (Read, Edit, Write and the shell, named PowerShell on Windows), which read a file
+            // without the Windows sandbox: two reads, an edit and a write of files in the repository, a shell redirect.
+            const call = (id: string, name: string, args: unknown) =>
+                toolCallTurn(id, name, JSON.stringify(args));
             const script = [
-                toolCallTurn("c1", "exec_command", JSON.stringify({ cmd: `cat ${spec.readFile}` })),
-                toolCallTurn(
-                    "c2",
-                    "apply_patch",
-                    patch([
-                        `*** Update File: ${inRepo(spec.readFile)}`,
-                        "@@",
-                        `+SYN ${spec.tag} wrote here`,
-                    ]),
-                ),
-                toolCallTurn(
-                    "c3",
-                    "apply_patch",
-                    patch([`*** Add File: ${probes.patchAdd}`, `+SYN ${spec.tag}`]),
-                ),
-                toolCallTurn(
-                    "c4",
-                    "exec_command",
-                    JSON.stringify({
-                        cmd: `echo SYN ${spec.tag} > chat-by-project-probe-shell.txt`,
-                    }),
-                ),
-                toolCallTurn("c5", "read_doc", JSON.stringify({ path: spec.docFile })),
+                call("c1", "Read", { file_path: spec.readFile }),
+                call("c2", "Read", { file_path: spec.docFile }),
+                call("c3", "Edit", {
+                    file_path: spec.readFile,
+                    old_string: spec.readMarker,
+                    new_string: `${spec.readMarker} SYN ${spec.tag} wrote here`,
+                }),
+                call("c4", "Write", {
+                    file_path: "chat-by-project-probe-patch.txt",
+                    content: `SYN ${spec.tag}\n`,
+                }),
+                call("c5", process.platform === "win32" ? "PowerShell" : "Bash", {
+                    command: `echo SYN ${spec.tag} > chat-by-project-probe-shell.txt`,
+                }),
                 textTurn("Read it; the repository is read-only for me."),
             ];
             const provider = new ScriptedProvider(script);
             const providers = new AgentProviders();
-            providers.add("codex", provider, "codex");
+            // The tool set follows the provider's vendor: "claude" gives Read, Edit, Write and Bash.
+            providers.add("codex", provider, "claude");
             runtime = await startHappyAgentRuntime({
                 happyHome,
                 environment,
@@ -230,50 +221,42 @@ describe.skipIf(!SPEC)("Orkest chat by project on Happy, live (GHO-204.4.1)", ()
                 instructions.slice(0, 200),
             );
 
-            // (b) A read in the repository. The shell is the agent's own way to read a file; on a Windows host whose
-            // sandbox is not provisioned it cannot run (a test never provisions it), so the doc read through the
-            // Orkest tools, which reads the same repository's docs, stands in and the line says so.
-            const shellRead = answer["c1"] ?? "";
-            if (shellRead.includes(spec.readMarker)) {
-                check(
-                    `(b) the agent reads ${spec.readFile} in the repository with its shell and gets its content`,
-                    true,
-                );
-            } else {
-                const sandbox = /sandbox setup is required/.test(shellRead);
-                const doc = answer["c5"] ?? "";
-                check(
-                    sandbox
-                        ? `(b) the agent reads ${spec.docFile} in the repository through read_doc and gets its content (the shell cannot run here: Windows sandbox not provisioned)`
-                        : `(b) the agent reads ${spec.readFile} in the repository with its shell and gets its content`,
-                    sandbox && doc.includes(spec.docMarker),
-                    sandbox ? `read_doc: ${doc}` : shellRead,
-                );
-            }
-
-            // (c) Every write is refused. The shell redirect always reaches the repository guard; a patch reaches it
-            // only when the permission layer lets it through (workspace_write on a host with no sandbox refuses it
-            // first), so the line names the layer that answered.
-            const byGuard = (id: string) => REFUSAL.test(answer[id] ?? "");
-            const refused = (id: string) =>
-                byGuard(id) ||
-                /permission review could not run|was not performed/.test(answer[id] ?? "");
+            // (b) The agent reads files in its working directory with its own Read tool (no shell, no sandbox): one
+            // by absolute path, one by a path relative to the working directory, which resolves in the repository.
             check(
-                "(c) the shell redirect under the repository is refused by the repository guard",
+                `(b) the agent reads ${spec.readFile} in the repository with its Read tool and gets its content`,
+                (answer["c1"] ?? "").includes(spec.readMarker),
+                answer["c1"],
+            );
+            check(
+                `(b) the agent reads ${spec.docFile} by a relative path (its working directory) and gets its content`,
+                (answer["c2"] ?? "").includes(spec.docMarker),
+                answer["c2"],
+            );
+
+            // (c) Every write is refused by the repository guard, and nothing on disk changes.
+            const byGuard = (id: string) => REFUSAL.test(answer[id] ?? "");
+            check(
+                "(c) the Edit of a file under the repository is refused by the guard",
+                byGuard("c3"),
+                answer["c3"],
+            );
+            check(
+                "(c) the Write of a file under the repository is refused by the guard",
                 byGuard("c4"),
                 answer["c4"],
             );
             check(
-                `(c) the update patch and the add patch are refused (${byGuard("c2") && byGuard("c3") ? "by the repository guard" : "by the permission layer before the guard"})`,
-                refused("c2") && refused("c3"),
-                `${answer["c2"] ?? ""} | ${answer["c3"] ?? ""}`,
+                "(c) the shell redirect under the repository is refused by the guard",
+                byGuard("c5"),
+                answer["c5"],
             );
             check(
                 "(c) the file on disk is unchanged",
                 (await readFile(inRepo(spec.readFile), "utf8")) === readmeBefore,
             );
             check(
-                "(c) the add patch created no file",
+                "(c) the Write created no file",
                 !(await exists(probes.patchAdd)),
                 probes.patchAdd,
             );
