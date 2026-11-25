@@ -58,6 +58,10 @@ Orkest parent session: "Yes, take 3cd056c (Recommended)", covering the restart c
 - **How it is consumed.** Every declarer (`happy-agent`, `happy-agent-modules`, `happy-agent-gym`)
   pins the same tarball (`file:../../vendor/...`), never `workspace:*`, so pnpm resolves one copy.
   No npm package depends on the base. The `happy-agent-modules` peer range also accepts the release.
+- **Approved exception to "Published SDK dependencies".** That AGENTS.md rule says the base is always
+  consumed from its published npm version; this tarball is not published. The operator approved
+  consuming it this way on 2026-11-12 ("Yes, tarball is fine", after an auditor raised exactly this
+  point). It holds for `0.0.67-orkest.1` only: a later base change needs its own approval.
 - **Windows note.** On Windows every SQLite-backed base test can fail in teardown with `EBUSY` when
   the gym helper removes its temporary directory; the unmodified upstream
   `AgentPersistenceDrizzlePrefix.test.ts` fails the same way. With only that teardown error ignored,

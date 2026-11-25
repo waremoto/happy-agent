@@ -38,6 +38,7 @@ import { ProjectsModule, type Project, type ProjectEvent } from "../projects/ind
 import { ProviderUsageModule } from "../providerUsage/index.js";
 import { SchedulingModule } from "../scheduling/index.js";
 import { UserInputModule, type UserInputRequest } from "../userInput/index.js";
+import { mayAnswerNativeToolQuestion } from "../userInput/impl/nativeToolAnswerer.js";
 import {
     WorkspacesModule,
     type Workspace,
@@ -1719,24 +1720,57 @@ export class HappyConnection implements HappySessionOperations, HappySpawnOperat
         answers: Record<string, unknown>,
     ): Promise<void> {
         await ctx.inTx(async (txCtx) => {
-            await this.#accessibleTask(txCtx, agentId);
+            const task = await this.#accessibleTask(txCtx, agentId);
             const pending = await this.#userInput.list(txCtx, agentId, { status: "pending" });
             const request = pending.find((candidate) => candidate.id === requestId);
             if (request === undefined) {
                 throw new Error(`Question "${requestId}" is no longer waiting for an answer.`);
             }
+            const answerer = await this.#nativeToolAnswerer(txCtx, task, request);
             await this.#userInput.answer(
                 txCtx,
                 agentId,
                 resolveHappyUserInputAnswers(request, answers),
+                answerer?.id,
             );
         });
+    }
+
+    /**
+     * The phone's paired person, as the HTTP route's team user (ORKEST-AGENCY 4.2c). A native
+     * tool's permission question is its task owner's: anyone else may neither answer nor dismiss
+     * it, since dismissing denies the action.
+     */
+    async #nativeToolAnswerer(
+        ctx: Context,
+        task: TaskRecord | undefined,
+        request: UserInputRequest | undefined,
+    ): Promise<TeamUser | undefined> {
+        if (this.#team?.enabled !== true) return undefined;
+        const answerer =
+            this.#connectionOwner === undefined
+                ? undefined
+                : await this.#team.getUser(ctx, this.#connectionOwner.id);
+        if (
+            request?.permissionRequest?.source === "native_tool" &&
+            !mayAnswerNativeToolQuestion(answerer, task)
+        ) {
+            throw new HappyMessageRefused(
+                "Only the task's owner may answer this permission question.",
+            );
+        }
+        return answerer;
     }
 
     /** Dismisses a question the person chose not to answer. */
     async cancelQuestion(ctx: Context, agentId: string, requestId: string): Promise<void> {
         await ctx.inTx(async (txCtx) => {
-            await this.#accessibleTask(txCtx, agentId);
+            const task = await this.#accessibleTask(txCtx, agentId);
+            await this.#nativeToolAnswerer(
+                txCtx,
+                task,
+                await this.#userInput.get(txCtx, agentId, requestId),
+            );
             await this.#userInput.cancel(txCtx, agentId, {
                 reason: "Dismissed from the phone.",
                 requestId,

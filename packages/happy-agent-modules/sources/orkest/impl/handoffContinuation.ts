@@ -10,7 +10,8 @@ export const handoffContinuationSchema = Type.Object({
     fromRunId: Type.String({ maxLength: 200 }),
     fromMode: Type.String({ maxLength: 100 }),
     workItemRevision: Type.Optional(Type.Union([Type.Number(), Type.String()])),
-    conversationCursor: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    // Father sends the checkpoint's `long EventCursor` here, a number; a string or null is also accepted.
+    conversationCursor: Type.Optional(Type.Union([Type.Number(), Type.String(), Type.Null()])),
     objective: Type.String({ maxLength: 20_000 }),
     completed: Type.Array(Type.String({ maxLength: 5_000 }), { maxItems: 200 }),
     openQuestions: Type.Array(Type.String({ maxLength: 5_000 }), { maxItems: 200 }),
