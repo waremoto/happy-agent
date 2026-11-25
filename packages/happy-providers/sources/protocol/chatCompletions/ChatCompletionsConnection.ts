@@ -30,7 +30,8 @@ const chunkSchema = Type.Object({
                     ),
                 ),
             }),
-            finish_reason: Type.Union([Type.String(), Type.Null()]),
+            // Optional: many OpenAI-compatible servers (the Ghost gateway among them) leave it off every chunk but the last.
+            finish_reason: Type.Optional(Type.Union([Type.String(), Type.Null()])),
         }),
     ),
     usage: Type.Optional(

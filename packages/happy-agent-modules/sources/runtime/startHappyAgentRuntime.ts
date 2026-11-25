@@ -1,7 +1,7 @@
 import { ensurePrivateDirectory } from "@slopus/happy-agent-compute";
 import { chmod, mkdir } from "node:fs/promises";
 import { ConnectionsModule } from "../connections/index.js";
-import { OrkestModule } from "../orkest/index.js";
+import { OrkestAfkModule, OrkestModule } from "../orkest/index.js";
 import { PeerMessagingModule } from "../peerMessaging/index.js";
 import { RunnersModule } from "../runners/index.js";
 
@@ -180,6 +180,7 @@ export interface HappyAgentRuntimeModules {
     readonly config: ConfigModule;
     readonly connections: ConnectionsModule;
     readonly orkest: OrkestModule;
+    readonly orkestAfk: OrkestAfkModule;
     readonly peerMessaging: PeerMessagingModule;
     readonly runners: RunnersModule;
     readonly contextWindow: ContextWindowModule;
@@ -714,6 +715,8 @@ export async function startHappyAgentRuntime(
         registerShutdown("exportedBots", async () => await exportedBots.close());
         const orkest = new OrkestModule(config, tasks);
         registerShutdown("orkest", async () => await orkest.close());
+        const orkestAfk = new OrkestAfkModule(config, tasks);
+        registerShutdown("orkest-afk", async () => await orkestAfk.close());
         const gemini = new GeminiModule(config, compute.computeModule, chatMedia);
         const imageGeneration = new ImageGenerationModule(config, chatMedia);
         menuBar = new MenuBarModule(config);
@@ -852,6 +855,7 @@ export async function startHappyAgentRuntime(
             contextWindow,
             connections,
             orkest,
+            orkestAfk,
             peerMessaging,
             runners,
             durableFunctions,
@@ -946,6 +950,7 @@ export async function startHappyAgentRuntime(
             bots,
             tasks,
             orkest,
+            orkestAfk,
             spaces,
             onboarding,
             artifacts,

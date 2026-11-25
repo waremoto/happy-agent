@@ -46,6 +46,7 @@ import type { UserInputModule } from "../userInput/index.js";
 import { getManagedProjectsDirectory } from "../impl/managedProjectsDirectory.js";
 import { getManagedWorkspacesDirectory } from "../impl/managedWorkspacesDirectory.js";
 import { isUserOriginMetadata } from "../impl/messageOrigin.js";
+import type { OrkestAfkEndpoint } from "../orkest/impl/OrkestAfkClient.js";
 import {
     agentModelCatalog,
     agentModelContext,
@@ -3718,6 +3719,45 @@ export class ConfigModule implements AgentModule {
         const url = this.#environmentValue("ORKEST_SESSION_URL")?.trim();
         if (!agency?.workerToken || !url || url.length > MAX_CONFIG_STRING_LENGTH) return undefined;
         return { url: url.replace(/\/+$/, ""), workerToken: agency.workerToken };
+    }
+
+    /**
+     * The Orkest AFK lane this installation works unattended runs for (GHO-189.3), from the
+     * environment only: `ORKEST_AFK_URL` (the Father base URL), `ORKEST_AFK_WORKER_TOKEN_FILE` (this
+     * worker's own Orkest token, its only credential: Father's gate lets it through on the owner lane
+     * alone, and the worker never holds Father's service token, so `ORKEST_AFK_TOKEN_FILE` is not read) and `ORKEST_AFK_MODEL` (`<providerId>:<modelId>`, or a
+     * model id the catalog knows). Optional `ORKEST_AFK_WORKER_ID` (default `happy-afk:<host>`),
+     * `ORKEST_AFK_WORK_ROOT` and `ORKEST_AFK_REPO`. A named token file that is unreadable or empty
+     * turns the lane off; there is no fallback. Tokens are read here and never logged or exposed.
+     */
+    get orkestAfk(): OrkestAfkEndpoint | undefined {
+        const value = (name: string) => this.#environmentValue(name)?.trim() || undefined;
+        const url = value("ORKEST_AFK_URL");
+        const workerTokenFile = value("ORKEST_AFK_WORKER_TOKEN_FILE");
+        const model = value("ORKEST_AFK_MODEL");
+        if (!url || !workerTokenFile || !model) return undefined;
+        if (url.length > MAX_CONFIG_STRING_LENGTH || model.length > MAX_CONFIG_STRING_LENGTH) {
+            return undefined;
+        }
+        const read = (file: string) => {
+            try {
+                return readFileSync(file, "utf8").trim();
+            } catch {
+                return "";
+            }
+        };
+        const workerToken = read(workerTokenFile);
+        if (workerToken.length === 0) return undefined;
+        const workRoot = value("ORKEST_AFK_WORK_ROOT");
+        const repo = value("ORKEST_AFK_REPO");
+        return {
+            url: url.replace(/\/+$/, ""),
+            workerToken,
+            workerId: value("ORKEST_AFK_WORKER_ID") ?? `happy-afk:${hostname()}`,
+            model,
+            ...(workRoot === undefined ? {} : { workRoot }),
+            ...(repo === undefined ? {} : { repo }),
+        };
     }
 
     /**
