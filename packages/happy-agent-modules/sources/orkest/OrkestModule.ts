@@ -44,6 +44,7 @@ import {
 import { projectSessionPreamble } from "./impl/projectSessionPreamble.js";
 import { MAIN_DOC_SEEN_KEY, mainDocTurn, type MainDocSeen } from "./impl/projectSessionMainDoc.js";
 import { projectSessionTools } from "./impl/projectSessionTools.js";
+import { proposalTurn } from "./impl/proposalTurn.js";
 import { deliverProjectSessionNotes } from "./impl/projectSessionNotes.js";
 
 /** How often the owner reads Orkest; a person who just clicked waits at most this long. */
@@ -211,12 +212,7 @@ export class OrkestModule implements AgentModule {
                         permissionMode: session.project.permissionMode,
                         scopeKind: session.project.scope.kind,
                         model: () => scope.agent.model ?? session.openingModel,
-                        turn: (ctx) =>
-                            runKV.getOrCreate(
-                                ctx,
-                                "orkest.turn",
-                                () => `t-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
-                            ),
+                        turn: (ctx, callId) => proposalTurn(runKV, ctx, callId),
                     });
                 }
                 const agency = new OrkestAgencyClient(endpoint);

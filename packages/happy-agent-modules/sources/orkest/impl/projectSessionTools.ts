@@ -39,8 +39,11 @@ export interface ProjectSessionToolsInput {
     readonly permissionMode: string;
     /** The model in force for this agent, for the proposal's co-author. */
     readonly model: () => string | undefined;
-    /** A stable id for the agent turn in progress (the seam allows one proposal per turn). */
-    readonly turn: (ctx: Context) => Promise<string>;
+    /**
+     * A stable id for the agent turn in progress (the seam allows one proposal per turn). GHO-205.7.1: given the
+     * proposing call's Base id, which becomes the turn so the chat can scroll to it.
+     */
+    readonly turn: (ctx: Context, callId?: string) => Promise<string>;
     /** GHO-199 — a project session (not a doc session) gets the orchestrator tools. */
     readonly scopeKind?: "project" | "doc";
 }
@@ -108,7 +111,7 @@ export function projectSessionTools(input: ProjectSessionToolsInput): readonly A
                 why: Type.String({ description: "One sentence: what you changed and why" }),
             }),
             returnType: Type.String(),
-            execute: async (ctx, args) => propose(ctx, input, args.path, args.why),
+            execute: async (ctx, args, call) => propose(ctx, input, args.path, args.why, call?.id),
             toLLM: (text) => [{ type: "text", text }],
         }),
     );
@@ -162,6 +165,7 @@ async function propose(
     input: ProjectSessionToolsInput,
     path: string,
     why: string,
+    callId?: string,
 ): Promise<string> {
     if (input.permissionMode !== "workspace_write")
         return "This session is read only: it cannot propose changes. Describe the change in the chat instead.";
@@ -181,7 +185,7 @@ async function propose(
             baseRev,
             text,
             why: why1,
-            turn: await input.turn(ctx),
+            turn: await input.turn(ctx, callId),
             ...(model === undefined ? {} : { model: model.slice(0, 120) }),
             agentSessionId: session?.id ?? input.taskId,
         });
