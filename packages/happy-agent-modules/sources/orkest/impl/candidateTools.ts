@@ -122,17 +122,69 @@ export interface CandidateFile {
 
 /** A repo-relative path with forward slashes, or null when it leaves the repository or names git's own files. */
 export function safeRepoPath(path: string): string | null {
-    return path; // GHO-209.3.1 red stub
+    const trimmed = path.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+    if (!trimmed || isAbsolute(trimmed) || /^[A-Za-z]:/.test(trimmed)) return null;
+    const parts = normalize(trimmed).replace(/\\/g, "/").split("/");
+    if (parts.some((p) => p === ".." || p === "") || parts[0] === ".git") return null;
+    return parts.join("/");
 }
 
+/**
+ * One commit on top of HEAD with the given whole files, built without touching the branch, index or working tree.
+ * Returns the base, the commit and the exact `git diff --binary base sha` bytes (with a final line feed).
+ */
 export async function buildCandidateCommit(
-    _git: GitRun,
-    _repoPath: string,
-    _files: readonly CandidateFile[],
-    _message: string,
-    _ref: string,
+    git: GitRun,
+    repoPath: string,
+    files: readonly CandidateFile[],
+    message: string,
+    ref: string,
 ): Promise<{ baseSha: string; sha: string; patch: string; branch: string }> {
-    throw new Error("not implemented");
+    if (files.length === 0) throw new Error("A proposed change needs at least one file.");
+    const paths = files.map((f) => safeRepoPath(f.path));
+    const bad = files.find((_, i) => paths[i] === null);
+    if (bad) throw new Error(`Refused path "${bad.path}": use a path inside the repository.`);
+    const baseSha = (await git(["rev-parse", "HEAD"], { cwd: repoPath })).trim();
+    const index = join(tmpdir(), `orkest-candidate-${randomUUID()}.index`);
+    const env = {
+        ...process.env,
+        GIT_INDEX_FILE: index,
+        GIT_AUTHOR_NAME: "Orkest agent",
+        GIT_AUTHOR_EMAIL: "agent@orkest.invalid",
+        GIT_COMMITTER_NAME: "Orkest agent",
+        GIT_COMMITTER_EMAIL: "agent@orkest.invalid",
+    };
+    try {
+        await git(["read-tree", baseSha], { cwd: repoPath, env });
+        for (const [i, file] of files.entries()) {
+            const blob = (
+                await git(["hash-object", "-w", "--stdin"], {
+                    cwd: repoPath,
+                    env,
+                    input: file.content,
+                })
+            ).trim();
+            await git(["update-index", "--add", "--cacheinfo", `100644,${blob},${paths[i]}`], {
+                cwd: repoPath,
+                env,
+            });
+        }
+        const tree = (await git(["write-tree"], { cwd: repoPath, env })).trim();
+        const sha = (
+            await git(["commit-tree", tree, "-p", baseSha, "-m", message], { cwd: repoPath, env })
+        ).trim();
+        const branch = `refs/orkest/candidates/${ref}`;
+        await git(["update-ref", branch, sha], { cwd: repoPath, env });
+        let patch = await git(["diff", "--binary", baseSha, sha], { cwd: repoPath });
+        if (!patch.trim())
+            throw new Error(
+                "The files are the same as the repository's; there is no change to propose.",
+            );
+        if (!patch.endsWith("\n")) patch += "\n";
+        return { baseSha, sha, patch, branch };
+    } finally {
+        await rm(index, { force: true });
+    }
 }
 
 export interface TicketToolsInput {
@@ -170,7 +222,44 @@ export function ticketCandidateTools(input: TicketToolsInput): readonly AnyAgent
                 reason: Type.String({ minLength: 1, maxLength: 1000 }),
             }),
             returnType: Type.String(),
-            execute: async () => "Not implemented.",
+            execute: async (_ctx, args) => {
+                if (input.repoPath === null)
+                    return "This ticket's project has no repository on this host, so a change cannot be proposed.";
+                let built: Awaited<ReturnType<typeof buildCandidateCommit>>;
+                try {
+                    built = await buildCandidateCommit(
+                        git,
+                        input.repoPath,
+                        args.files,
+                        `${input.workLabel}: ${args.title}`,
+                        `${input.workLabel}/${randomUUID().slice(0, 8)}`,
+                    );
+                } catch (error) {
+                    return `Not proposed: ${(error as Error).message}`;
+                }
+                const answer = await input.client.proposeCandidate(input.runId, input.fence(), {
+                    agentId: input.agentId,
+                    workItemProvider: "multica",
+                    workItemId: input.workLabel,
+                    title: args.title,
+                    patchBase64: Buffer.from(built.patch, "utf8").toString("base64"),
+                    git: {
+                        repo: input.repoPath,
+                        baseSha: built.baseSha,
+                        sha: built.sha,
+                        branch: built.branch,
+                    },
+                    ask: {
+                        checked: args.checked,
+                        action: args.action,
+                        reason: args.reason,
+                        ...(input.agentName ? { agentName: input.agentName } : {}),
+                    },
+                });
+                return answer.ok
+                    ? `Proposed as change ${answer.id} (commit ${built.sha.slice(0, 7)} on ${built.baseSha.slice(0, 7)}). It waits for an independent check, then the person decides.`
+                    : `Orkest refused the proposal: ${answer.reason ?? "unknown reason"}.`;
+            },
             toLLM: (text) => [{ type: "text", text }],
         }),
     ];
@@ -228,7 +317,22 @@ export function verifyCandidateTools(input: VerifyToolsInput): readonly AnyAgent
                 checkSet: Type.String({ minLength: 1, maxLength: 200 }),
             }),
             returnType: Type.String(),
-            execute: async () => "Not implemented.",
+            execute: async (_ctx, args) => {
+                const c = await load();
+                if (!c) return "Orkest gave this session no proposed change to check.";
+                const answer = await input.client.recordReceipt(input.runId, input.fence(), {
+                    verifierId: input.agentId,
+                    ...(input.agentName ? { verifierName: input.agentName } : {}),
+                    candidateId: c.candidateId,
+                    sha256: c.sha256,
+                    checkSet: args.checkSet,
+                    verdict: args.verdict,
+                    reason: args.reason,
+                });
+                return answer.ok
+                    ? `Recorded: ${args.verdict}. The person now sees your check on the card.`
+                    : `Orkest refused the check: ${answer.reason ?? "unknown reason"}.`;
+            },
             toLLM: (text) => [{ type: "text", text }],
         }),
     ];
