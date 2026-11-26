@@ -28,10 +28,8 @@ function modeLane(value: unknown): SessionLane | undefined {
  * it was created with. Undefined when neither names a provider and a model.
  */
 export function sessionLaneOf(metadata: Readonly<Record<string, unknown>> | undefined): SessionLane | undefined {
-    // RED STUB (GHO-207.6.2): no lane is read yet.
-    void metadata;
-    void modeLane;
-    return undefined;
+    if (metadata === undefined) return undefined;
+    return modeLane(metadata["lastMode"]) ?? modeLane(metadata["initialMode"]);
 }
 
 /** The lane to report, or undefined when it is unknown or is the one already reported. */
@@ -39,8 +37,8 @@ export function sessionLaneChange(
     current: SessionLane | undefined,
     reported: SessionLane | undefined,
 ): SessionLane | undefined {
-    // RED STUB (GHO-207.6.2): nothing is reported yet.
-    void current;
-    void reported;
-    return undefined;
+    if (current === undefined) return undefined;
+    if (reported !== undefined && reported.lane === current.lane && reported.modelId === current.modelId)
+        return undefined;
+    return current;
 }

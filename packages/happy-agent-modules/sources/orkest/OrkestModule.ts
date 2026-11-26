@@ -53,6 +53,12 @@ import { projectSessionPreamble } from "./impl/projectSessionPreamble.js";
 import { MAIN_DOC_SEEN_KEY, mainDocTurn, type MainDocSeen } from "./impl/projectSessionMainDoc.js";
 import { projectSessionTools } from "./impl/projectSessionTools.js";
 import { proposalTurn } from "./impl/proposalTurn.js";
+import {
+    SESSION_LANE_EVENT,
+    sessionLaneChange,
+    sessionLaneOf,
+    type SessionLane,
+} from "./impl/sessionLane.js";
 import { deliverProjectSessionNotes } from "./impl/projectSessionNotes.js";
 
 /** How often the owner reads Orkest; a person who just clicked waits at most this long. */
@@ -81,6 +87,8 @@ interface OpenSession {
     openingModel?: string;
     /** GHO-207.3.1 — set on a ticket session: its work item, as its agent's instructions. */
     ticket?: string;
+    /** GHO-207.6.2 — the lane (Happy provider) and model last reported for this session's conversation. */
+    reportedLane?: SessionLane;
 }
 
 /** Where an agent that starts in a project's repository may not write (`cwd` is where its relative paths resolve). */
@@ -375,6 +383,7 @@ export class OrkestModule implements AgentModule {
         for (const session of await agency.pending())
             await this.#start(ctx, agency, session, workerId);
         for (const open of this.#open.values()) await this.#linkAgentSession(agency, open);
+        for (const open of this.#open.values()) await this.#reportLane(ctx, agency, open);
 
         const now = Date.now();
         for (const open of this.#open.values()) {
@@ -551,6 +560,7 @@ export class OrkestModule implements AgentModule {
             fence: lease.fence,
             lastHeartbeat: Date.now(),
             openingModel: modelId,
+            reportedLane: { lane: session.harness, modelId },
             ...(isProjectSession(session)
                 ? {
                       project: withPlacementNotes(
@@ -567,9 +577,33 @@ export class OrkestModule implements AgentModule {
             taskId: task.id,
             agentId: task.agentId,
             harness: session.harness,
+            // GHO-207.6.2 — a session opens on its harness's own provider; the chat may move it to another lane.
+            lane: session.harness,
             modelId,
             permissionMode: session.permissionMode,
         });
+    }
+
+    /**
+     * GHO-207.6.2 — when the conversation runs on another lane or model than last reported (the chat switched it),
+     * record that on the run, so the receipt names the lane and model that answered. Never throws.
+     */
+    async #reportLane(ctx: Context, agency: OrkestAgencyClient, open: OpenSession): Promise<void> {
+        if (this.#agents === undefined) return;
+        try {
+            const config = await this.#agents.config(ctx, open.agentId);
+            const change = sessionLaneChange(sessionLaneOf(config?.metadata), open.reportedLane);
+            if (change === undefined) return;
+            const result = await agency.publish(open.runId, open.fence, SESSION_LANE_EVENT, {
+                taskId: open.taskId,
+                agentId: open.agentId,
+                lane: change.lane,
+                modelId: change.modelId,
+            });
+            if (result.ok) open.reportedLane = change;
+        } catch {
+            // The lane report is evidence only; the session runs on regardless.
+        }
     }
 
     /**
