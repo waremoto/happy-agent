@@ -604,7 +604,7 @@ describe("Orkest project session tools on Happy (GHO-196.2.2)", () => {
         }
     }, 240_000);
 
-    it("starts a ticket session of a project in its repository and still drafts the work item", async () => {
+    it("starts a ticket session of a project in its repository and tells its agent the work item", async () => {
         const repo = await mkdtemp(join(inject("orkestFixtureRoot"), "repo-"));
         const father = await fakeFather(
             { kind: "ticket", projectId: PROJECT, path: null, repoPath: repo },
@@ -615,15 +615,18 @@ describe("Orkest project session tools on Happy (GHO-196.2.2)", () => {
                 brief: "The brief.",
             },
         );
-        const { runtime } = await happy(father.url, "http://127.0.0.1:9");
+        const { runtime, provider } = await happy(father.url, "http://127.0.0.1:9", [textTurn("On it.")]);
         await openTask(runtime, father);
         const config = await runtime.system.config(dbCtx(runtime), derivedId("a", RUN));
         expect(config?.environment?.workingDirectory).toBe(repo);
         expect(config?.metadata?.["orkestProjectId"]).toBe(PROJECT);
-        // A ticket session is not a project session: its composer is drafted with the work item.
-        expect((config?.metadata?.["draft"] as { text?: string } | undefined)?.text).toContain(
-            "SYN-7: Tighten login",
-        );
+        // GHO-207.3.1: the composer is the person's; the work item reaches the agent as instructions.
+        expect((config?.metadata?.["draft"] as { text?: string } | undefined)?.text ?? "").toBe("");
+        await say(runtime, "Go.", "m1");
+        await expect.poll(() => requests(provider).length, { timeout: 20_000 }).toBeGreaterThan(0);
+        const instructions = provider.sessions[0]!.options.instructions;
+        expect(instructions).toContain("Orkest work item SYN-7: Tighten login");
+        expect(instructions).toContain("The brief.");
     }, 90_000);
 
     it("starts an old ticket row, with no project, in its own task folder as before", async () => {

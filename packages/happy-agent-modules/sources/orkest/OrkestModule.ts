@@ -747,3 +747,13 @@ function withPlacementNotes(
 export function derivedId(kind: "t" | "w" | "a", runId: string): string {
     return `o${kind}${createHash("sha256").update(`orkest:${kind}:${runId}`).digest("hex").slice(0, 24)}`;
 }
+
+/** GHO-207.3.1 red stub: the ticket session still drafts its composer, and its agent is told nothing. */
+export function ticketInstructions(_session: {
+    readonly title: string;
+    readonly workLabel: string;
+    readonly brief: string;
+    readonly continuation?: unknown;
+}): string {
+    return "";
+}
