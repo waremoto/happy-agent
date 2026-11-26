@@ -301,9 +301,8 @@ export class UserInputModule implements AgentModule {
         agentId: string,
         policy: ((permission: NativeToolPermission) => boolean) | undefined,
     ): void {
-        // GHO-207.2 red stub: no policy is kept.
-        void agentId;
-        void policy;
+        if (policy === undefined) this.#nativeToolPolicies.delete(agentId);
+        else this.#nativeToolPolicies.set(agentId, policy);
     }
 
     async askForNativeToolPermission(

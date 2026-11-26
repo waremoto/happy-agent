@@ -74,11 +74,11 @@ export function projectSessionPreamble(input: ProjectSessionPreambleInput): stri
         lines.push(
             repoPath === null
                 ? `This project has no repository on this host, so you start in an empty folder, ${taskPath}/project. Your only writable place is ${taskPath}/doc; propose doc changes with propose_document.`
-                : harnessMode === true && !readOnly && false
+                : harnessMode === true && !readOnly
                   ? `You start in the project's repository at ${repoPath}, with the project's harness mode on: work here as Claude Code or Codex does in its project folder. Read, edit, run tests and gates, and commit locally without asking. Anything outside this folder, git push or any other remote git, deploys, network calls, package installs and secrets still go to the person as an approval card: when the person asks for one of them, run it and let the card ask. Doc proposals (propose_document) still work from ${taskPath}/doc.`
                   : `You start in the project's repository at ${repoPath}. Read it freely. Never write, delete or run commands that change files there. Your only writable place is ${taskPath}/doc; propose doc changes with propose_document.`,
         );
-        if (repoPath === null && missingRepoPath !== undefined && false)
+        if (repoPath === null && missingRepoPath !== undefined)
             lines.push(
                 `${missingRepoNotice(missingRepoPath)} Begin your first reply with exactly that sentence, so the person knows.`,
             );
