@@ -1,6 +1,13 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
+import type {
+    CandidateAnswer,
+    CandidateForVerify,
+    ProposeCandidateInput,
+    RecordCheckInput,
+} from "./candidateTools.js";
+
 export interface OrkestAgencyEndpoint {
     readonly url: string;
     readonly token: string;
@@ -50,6 +57,13 @@ export const attendedSessionSchema = Type.Object({
     /** GHO-195 — `happy` or `librechat`; present only on a project or doc session. */
     backend: Type.Optional(Type.String()),
     startedBy: Type.Optional(Type.Unknown()),
+    /** GHO-209 — present only on a session a person opened to check one proposed change. */
+    verify: Type.Optional(
+        Type.Union([
+            Type.Object({ candidateId: Type.String({ minLength: 1, maxLength: 64 }) }),
+            Type.Null(),
+        ]),
+    ),
 });
 export type AttendedSession = Static<typeof attendedSessionSchema>;
 
@@ -205,6 +219,61 @@ export class OrkestAgencyClient {
         );
     }
 
+    /** GHO-209 — publish a proposed change (a diff plus its ask) for this run's ticket. */
+    async proposeCandidate(
+        runId: string,
+        fence: number,
+        input: ProposeCandidateInput,
+    ): Promise<CandidateAnswer> {
+        const r = await this.#call(
+            "POST",
+            `/internal/agency/runs/${encodeURIComponent(runId)}/candidates`,
+            { fence, ...input },
+        );
+        if (r.status === 201)
+            return { ok: true, id: String((r.body as { artifactId?: unknown })?.artifactId ?? "") };
+        return { ok: false, reason: refusal(r) };
+    }
+
+    /** GHO-209 — the exact change a verify run was opened to check; null for any other run. */
+    async readCandidate(runId: string): Promise<CandidateForVerify | null> {
+        const r = await this.#call(
+            "GET",
+            `/internal/agency/runs/${encodeURIComponent(runId)}/candidate`,
+        );
+        if (r.status !== 200 || typeof r.body !== "object" || r.body === null) return null;
+        const c = r.body as CandidateForVerify;
+        return typeof c.candidateId === "string" &&
+            typeof c.sha256 === "string" &&
+            typeof c.patchBase64 === "string"
+            ? c
+            : null;
+    }
+
+    /** GHO-209 — a verify run's receipt; its only subject is the candidate Father gave the run. */
+    async recordReceipt(
+        runId: string,
+        fence: number,
+        input: RecordCheckInput,
+    ): Promise<CandidateAnswer> {
+        const r = await this.#call(
+            "POST",
+            `/internal/agency/runs/${encodeURIComponent(runId)}/receipts`,
+            {
+                fence,
+                verifierId: input.verifierId,
+                ...(input.verifierName ? { verifierName: input.verifierName } : {}),
+                subjects: [{ artifactId: input.candidateId, sha256: input.sha256 }],
+                checkSet: input.checkSet,
+                verdict: input.verdict,
+                reason: input.reason,
+            },
+        );
+        if (r.status === 201)
+            return { ok: true, id: String((r.body as { receiptId?: unknown })?.receiptId ?? "") };
+        return { ok: false, reason: refusal(r) };
+    }
+
     #sessions(response: { status: number; body: unknown }): AttendedSession[] {
         if (response.status !== 200 || !Array.isArray(response.body)) {
             throw new Error(`Orkest answered ${response.status}.`);
@@ -311,6 +380,13 @@ export class OrkestAgencyClient {
         }
         return { status: response.status, body: parsed };
     }
+}
+
+function refusal(r: { status: number; body: unknown }): string {
+    const b = r.body as { reason?: unknown; error?: unknown } | null;
+    const why =
+        typeof b?.reason === "string" ? b.reason : typeof b?.error === "string" ? b.error : null;
+    return why ? `${why} (${r.status})` : `answered ${r.status}`;
 }
 
 function answer(response: { status: number; body: unknown }): AgencyAnswer {

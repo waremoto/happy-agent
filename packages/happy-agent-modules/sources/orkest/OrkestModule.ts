@@ -52,6 +52,7 @@ import {
 import { projectSessionPreamble } from "./impl/projectSessionPreamble.js";
 import { MAIN_DOC_SEEN_KEY, mainDocTurn, type MainDocSeen } from "./impl/projectSessionMainDoc.js";
 import { projectSessionTools } from "./impl/projectSessionTools.js";
+import { ticketCandidateTools, verifyCandidateTools } from "./impl/candidateTools.js";
 import { proposalTurn } from "./impl/proposalTurn.js";
 import {
     SESSION_LANE_EVENT,
@@ -86,9 +87,26 @@ interface OpenSession {
     /** The model the session opened with, when the agent scope names none. */
     openingModel?: string;
     /** GHO-207.3.1 — set on a ticket session: its work item, as its agent's instructions. */
-    ticket?: string;
+    ticketBrief?: string;
+    /** GHO-209 — a ticket session: what its proposed changes are keyed on, and where they are built. */
+    ticket?: TicketSessionState;
     /** GHO-207.6.2 — the lane (Happy provider) and model last reported for this session's conversation. */
     reportedLane?: SessionLane;
+}
+
+interface TicketSessionState {
+    readonly workLabel: string;
+    readonly repoPath: string | null;
+    /** Set when a person opened this session to check one proposed change. */
+    readonly verifyCandidateId?: string;
+}
+
+function ticketSessionState(session: AttendedSession, repoPath: string | null): TicketSessionState {
+    return {
+        workLabel: session.workLabel,
+        repoPath,
+        ...(session.verify ? { verifyCandidateId: session.verify.candidateId } : {}),
+    };
 }
 
 /** Where an agent that starts in a project's repository may not write (`cwd` is where its relative paths resolve). */
@@ -196,7 +214,7 @@ export class OrkestModule implements AgentModule {
             instructions: (_ctx, scope) => {
                 const session = [...this.#open.values()].find((s) => s.agentId === scope.agent.id);
                 // GHO-207.3.1: a ticket session's agent is told its work item; the composer stays the person's.
-                if (session?.ticket !== undefined) return session.ticket;
+                if (session?.ticketBrief !== undefined) return session.ticketBrief;
                 if (!session?.project || !this.#config.attendedOnly) return "";
                 const p = session.project;
                 return projectSessionPreamble({
@@ -288,7 +306,29 @@ export class OrkestModule implements AgentModule {
                     });
                 }
                 const agency = new OrkestAgencyClient(endpoint);
+                // GHO-209: a ticket session proposes changes; a session opened to check one reads it and records the check.
+                // The agent id is per run, so a check from another session on this same worker is still independent.
+                const candidateTools =
+                    session.ticket === undefined
+                        ? []
+                        : session.ticket.verifyCandidateId !== undefined
+                          ? verifyCandidateTools({
+                                client: agency,
+                                runId: session.runId,
+                                fence: () => session.fence,
+                                agentId: `${endpoint.workerId}/${session.agentId}`,
+                                agentName: "Checker",
+                            })
+                          : ticketCandidateTools({
+                                client: agency,
+                                runId: session.runId,
+                                fence: () => session.fence,
+                                agentId: `${endpoint.workerId}/${session.agentId}`,
+                                workLabel: session.ticket.workLabel,
+                                repoPath: session.ticket.repoPath,
+                            });
                 return [
+                    ...candidateTools,
                     defineAgentTool({
                         name: "read_dossier_annotations",
                         shouldReviewInAutoMode: () => false,
@@ -569,7 +609,10 @@ export class OrkestModule implements AgentModule {
                           session,
                       ),
                   }
-                : { ticket: ticketInstructions(session) }),
+                : {
+                      ticketBrief: ticketInstructions(session),
+                      ticket: ticketSessionState(session, placement.repoPath),
+                  }),
         };
         this.#open.set(session.runId, opened);
         await this.#openProject(opened);
@@ -652,7 +695,12 @@ export class OrkestModule implements AgentModule {
                 ? {}
                 : { openingModel: HARNESS_MODELS[session.harness] }),
             ...(project === undefined ? {} : { project }),
-            ...(isProjectSession(session) ? {} : { ticket: ticketInstructions(session) }),
+            ...(isProjectSession(session)
+                ? {}
+                : {
+                      ticketBrief: ticketInstructions(session),
+                      ticket: ticketSessionState(session, placement.repoPath),
+                  }),
         };
         this.#open.set(session.runId, open);
         await this.#openProject(open);
