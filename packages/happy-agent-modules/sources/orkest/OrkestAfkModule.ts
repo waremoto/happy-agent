@@ -220,6 +220,8 @@ export class OrkestAfkModule implements AgentModule {
                     this.#lastError = mode;
                     return;
                 }
+                // Before the first run is drained, so no run's shell starts unmarked.
+                this.#config.markUnattendedProcess();
                 const root = withAgentDatabase(detach(ctx).named("orkest-afk-owner"), ctx.db);
                 const lifetime =
                     ctx.lifetime === undefined
