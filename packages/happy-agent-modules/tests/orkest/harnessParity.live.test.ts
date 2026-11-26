@@ -145,7 +145,9 @@ describe.skipIf(!SPEC)("Orkest harness parity at the project path, real model tu
                         if (answered.has(question.id)) continue;
                         answered.add(question.id);
                         const text = JSON.stringify(question);
-                        const allowed = !/git\s+push/i.test(text);
+                        // Any git invocation that pushes, including `git -C <path> push` (GHO-207 QA: that form was
+                        // answered "Allow once" and failed the harness-mode case).
+                        const allowed = !/\bgit\b(?:\s+(?:-C\s+\S+|-c\s+\S+|--?[\w-]+(?:=\S+)?))*\s+push\b/i.test(text);
                         cards.push({ case: which, action: text.slice(0, 300), allowed });
                         await rt.modules.userInput
                             .answer(ctx, agentId, {
