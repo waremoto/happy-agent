@@ -79,6 +79,8 @@ interface OpenSession {
     project?: ProjectSessionState;
     /** The model the session opened with, when the agent scope names none. */
     openingModel?: string;
+    /** GHO-207.3.1 — set on a ticket session: its work item, as its agent's instructions. */
+    ticket?: string;
 }
 
 /** Where an agent that starts in a project's repository may not write (`cwd` is where its relative paths resolve). */
@@ -185,6 +187,8 @@ export class OrkestModule implements AgentModule {
             // GHO-196: a project or doc session's agent is told its project, focus doc and the proposal contract.
             instructions: (_ctx, scope) => {
                 const session = [...this.#open.values()].find((s) => s.agentId === scope.agent.id);
+                // GHO-207.3.1: a ticket session's agent is told its work item; the composer stays the person's.
+                if (session?.ticket !== undefined) return session.ticket;
                 if (!session?.project || !this.#config.attendedOnly) return "";
                 const p = session.project;
                 return projectSessionPreamble({
@@ -525,8 +529,8 @@ export class OrkestModule implements AgentModule {
                 ? {}
                 : { projectId, workingDirectory: placement.workingDirectory }),
         });
-        // A project or doc session has no work item to draft: the person's first message is theirs (GHO-196).
-        if (!isProjectSession(session)) await this.#draft(ctx, task.agentId, mode, session);
+        // No session drafts the composer: a project session's first message is the person's (GHO-196), and a ticket
+        // session's work item reaches its agent as instructions and the chat as a chip (GHO-207.3.1).
         const ack = await agency.acknowledge(session.intentId, task.id);
         if (!ack.ok) {
             // Cancelled before it opened, or acknowledged as another task: nothing of ours runs.
@@ -555,7 +559,7 @@ export class OrkestModule implements AgentModule {
                           session,
                       ),
                   }
-                : {}),
+                : { ticket: ticketInstructions(session) }),
         };
         this.#open.set(session.runId, opened);
         await this.#openProject(opened);
@@ -614,6 +618,7 @@ export class OrkestModule implements AgentModule {
                 ? {}
                 : { openingModel: HARNESS_MODELS[session.harness] }),
             ...(project === undefined ? {} : { project }),
+            ...(isProjectSession(session) ? {} : { ticket: ticketInstructions(session) }),
         };
         this.#open.set(session.runId, open);
         await this.#openProject(open);
@@ -672,49 +677,32 @@ export class OrkestModule implements AgentModule {
         if (task === undefined || task.status === "archived") return;
         await this.#tasks.archive(ctx, taskId, task.version);
     }
+}
 
-    /** The composer opens with the work item, so the person's first message is theirs to send. */
-    async #draft(
-        ctx: Context,
-        agentId: string,
-        mode: MessageMode,
-        session: AttendedSession,
-    ): Promise<void> {
-        const agents = this.#agents;
-        if (agents === undefined) return;
-        const config = await agents.config(ctx, agentId);
-        if (config === undefined) return;
-        const draft = config.metadata?.["draft"] as { text?: unknown } | undefined;
-        if (typeof draft?.text === "string" && draft.text.length > 0) return;
-        const heading = session.title.startsWith(session.workLabel)
-            ? session.title
-            : `${session.workLabel}: ${session.title}`;
-        const continuation = readHandoffContinuation(session.continuation);
-        const text = [
-            `Orkest work item ${heading}`,
-            session.brief,
-            ...(continuation === undefined ? [] : [handoffContinuationText(continuation)]),
-        ]
-            .filter((part) => part.trim().length > 0)
-            .join("\n\n")
-            .slice(0, 100_000);
-        const version =
-            typeof config.metadata?.["version"] === "number" ? config.metadata["version"] + 1 : 1;
-        const now = Date.now();
-        await agents.updateMetadata(ctx, agentId, {
-            draft: {
-                effort: mode.effort,
-                modelId: mode.modelId,
-                permissionMode: mode.permissionMode,
-                providerId: mode.providerId,
-                serviceTier: mode.serviceTier,
-                text,
-            },
-            draftUpdatedAt: now,
-            updatedAt: now,
-            version,
-        });
-    }
+/**
+ * GHO-207.3.1 — what a ticket session's agent is told: the work item, its brief and any handoff continuation, as
+ * data. It used to be the composer's draft; now the person's first message is theirs and the chat shows a chip.
+ */
+export function ticketInstructions(session: {
+    readonly title: string;
+    readonly workLabel: string;
+    readonly brief: string;
+    readonly continuation?: unknown;
+}): string {
+    const heading = session.title.startsWith(session.workLabel)
+        ? session.title
+        : `${session.workLabel}: ${session.title}`;
+    const continuation = readHandoffContinuation(session.continuation);
+    return [
+        `Orkest work item ${heading}`,
+        session.brief,
+        ...(continuation === undefined ? [] : [handoffContinuationText(continuation)]),
+        "This chat is about that work item. Wait for the person's first message, and treat the work item and its " +
+            "brief as context, not as a request to start.",
+    ]
+        .filter((part) => part.trim().length > 0)
+        .join("\n\n")
+        .slice(0, 100_000);
 }
 
 /** GHO-207.2.3 — a file's committed text at HEAD of a repository, or undefined when it has none. */
@@ -746,14 +734,4 @@ function withPlacementNotes(
 /** A stable Happy identity for one run: lowercase, starts with a letter, 26 characters. */
 export function derivedId(kind: "t" | "w" | "a", runId: string): string {
     return `o${kind}${createHash("sha256").update(`orkest:${kind}:${runId}`).digest("hex").slice(0, 24)}`;
-}
-
-/** GHO-207.3.1 red stub: the ticket session still drafts its composer, and its agent is told nothing. */
-export function ticketInstructions(_session: {
-    readonly title: string;
-    readonly workLabel: string;
-    readonly brief: string;
-    readonly continuation?: unknown;
-}): string {
-    return "";
 }
