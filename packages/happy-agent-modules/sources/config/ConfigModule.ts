@@ -3748,6 +3748,15 @@ export class ConfigModule implements AgentModule {
     }
 
     /**
+     * Marks this process, and so every program it starts from now on, as an unattended run: agent
+     * shells inherit the process environment, and the Orkest helper reads `ORKEST_AFK_RUN` to
+     * apply its unattended-lane refusals (Rule 24) without relying on the agent to ask for them.
+     */
+    markUnattendedProcess(): void {
+        process.env.ORKEST_AFK_RUN = "1";
+    }
+
+    /**
      * The optional discovery ceiling for unattended Git reads.
      *
      * A hermetic installation can live beneath another repository while treating its own project

@@ -265,6 +265,8 @@ async function afkHappy(
     provider: ScriptedProvider,
 ): Promise<HappyAgentRuntime & { closeForTest: () => Promise<void> }> {
     vi.stubEnv("HOME", installation.home);
+    // The owner marks the process itself; unstubbing after the test takes the mark away again.
+    vi.stubEnv("ORKEST_AFK_RUN", undefined);
     const providers = new AgentProviders();
     providers.add("scripted", provider, "gym");
     const runtime = await startHappyAgentRuntime({
@@ -427,6 +429,14 @@ describe("Orkest AFK owner (GHO-189.3.1)", () => {
         }
     }, 90_000);
 
+    it("marks the daemon's own environment as unattended, so the Orkest helper in its shells knows", async () => {
+        const agency = await fakeAfkAgency();
+        const installation = await afkInstallation(agency.url);
+        await afkHappy(installation, new ScriptedProvider([hangingTurn]));
+        // Agent shells inherit this process environment; `orkest.py` reads the variable (Rule 24).
+        await expect.poll(() => process.env.ORKEST_AFK_RUN, { timeout: 60_000 }).toBe("1");
+    }, 90_000);
+
     it("reclaims its run after a restart with a higher fence, without re-sending the brief or opening a second task", async () => {
         const agency = await fakeAfkAgency({ autoAnswer: "approved" });
         const installation = await afkInstallation(agency.url);
@@ -499,6 +509,7 @@ describe("Orkest AFK owner (GHO-189.3.1)", () => {
             "[features]\nattended_only = false\n",
         );
         expect(config.orkestAfk).toMatchObject({ url: agency.url, workerId: "happy-afk:test" });
+        vi.stubEnv("ORKEST_AFK_RUN", undefined);
         const module = new OrkestAfkModule(config, {} as never);
         cleanups.push(async () => await module.close());
         const db = moduleDatabase([], "orkest-afk-refuse");
@@ -511,6 +522,8 @@ describe("Orkest AFK owner (GHO-189.3.1)", () => {
             state: "refused",
             lastError: "Orkest AFK runs need [features] attended_only = true.",
         });
+        // A Happy that owns no unattended run is not an unattended process.
+        expect(process.env.ORKEST_AFK_RUN).toBeUndefined();
     }, 30_000);
 
     it("stays off without a readable worker token file, never falling back to a tokenless lane", async () => {

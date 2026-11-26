@@ -61,6 +61,11 @@ owner it refuses unless `[features] attended_only = true`, and it also refuses a
 model (`claude-code/`, `codex-cli/`, ...): such a harness runs its own tools, so no call of it could
 reach `beforeToolCall` to be put to a person.
 
+Once the owner runs, it sets `ORKEST_AFK_RUN=1` on the daemon's own process
+(`ConfigModule.markUnattendedProcess`). Agent shells inherit that environment, so `bin/orkest.py`
+takes its unattended lane there without being asked. A refused owner marks nothing. The lab1
+launcher (Ghost `scripts/orkest-afk-worker-start.ps1`) sets the same variable.
+
 Identities are derived from the run with the salt `orkest-afk:` (`afkDerivedId`), never the
 attended `orkest:` salt, and the task folder is `orkest_afk_<hash>`. That folder is the run's work
 directory; `ORKEST_AFK_WORK_ROOT` turns it into a link to `<root>/<folder>`, and `ORKEST_AFK_REPO`
