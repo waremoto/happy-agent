@@ -133,6 +133,11 @@ export class UserInputModule implements AgentModule {
     #nativeToolQuestionExpiryMs = DEFAULT_NATIVE_TOOL_QUESTION_EXPIRY_MS;
     /** When this process started, so questions an earlier process left behind can be told apart. */
     #startedAt = 0;
+    /**
+     * GHO-207.2.3 — per agent, a policy that answers a native agent's permission question for the person (harness
+     * mode). It only ever allows; a question it does not allow goes to the person's card as before.
+     */
+    readonly #nativeToolPolicies = new Map<string, (permission: NativeToolPermission) => boolean>();
 
     constructor(presence: PresenceModule) {
         this.#store = createSqliteUserInputStorage();
@@ -291,6 +296,16 @@ export class UserInputModule implements AgentModule {
      * question, or `signal` aborting resolves `false`; aborting also withdraws the question so it
      * never waits on an answer nobody will act on.
      */
+    /** GHO-207.2.3 — set (or, with undefined, clear) the policy that answers an agent's native questions. */
+    setNativeToolPolicy(
+        agentId: string,
+        policy: ((permission: NativeToolPermission) => boolean) | undefined,
+    ): void {
+        // GHO-207.2 red stub: no policy is kept.
+        void agentId;
+        void policy;
+    }
+
     async askForNativeToolPermission(
         ctx: Context,
         agentId: string,
@@ -298,6 +313,19 @@ export class UserInputModule implements AgentModule {
         signal: AbortSignal,
     ): Promise<boolean> {
         if (signal.aborted) return false;
+        const policy = this.#nativeToolPolicies.get(agentId);
+        let allowed = false;
+        try {
+            allowed = policy?.(permission) === true;
+        } catch {
+            allowed = false;
+        }
+        if (allowed) {
+            ctx.log.info(
+                `Harness mode allowed ${permission.providerTitle}: ${permission.action.slice(0, 200)}`,
+            );
+            return true;
+        }
         const { input, permissionRequest } = nativeToolPermissionQuestion(permission);
         // The question expires: once its deadline passes it settles as timed out, which is a
         // denial, and an answer that arrives later is refused like any other stale answer.

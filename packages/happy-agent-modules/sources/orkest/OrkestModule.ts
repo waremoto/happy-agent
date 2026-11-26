@@ -1,4 +1,5 @@
 import { Type } from "@sinclair/typebox";
+import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 
@@ -19,6 +20,7 @@ import {
 } from "../impl/messageOrigin.js";
 import { ConfigModule } from "../config/index.js";
 import { TasksModule } from "../tasks/index.js";
+import type { UserInputModule } from "../userInput/index.js";
 import {
     OrkestAgencyClient,
     type AttendedSession,
@@ -33,6 +35,12 @@ import {
     taskNameFor,
 } from "./impl/chatByProject.js";
 import { claudeSessionIdFor } from "./impl/claudeSessionId.js";
+import {
+    HARNESS_MODE_FILE,
+    harnessModeAllows,
+    harnessModeApplies,
+    parseHarnessModeFile,
+} from "./impl/harnessMode.js";
 import { handoffContinuationText, readHandoffContinuation } from "./impl/handoffContinuation.js";
 import { OrkestSessionClient, type OrkestSessionCall } from "./impl/OrkestSessionClient.js";
 import {
@@ -116,9 +124,54 @@ export class OrkestModule implements AgentModule {
     #status: "disabled" | "refused" | "running" = "disabled";
     #lastError: string | null = null;
 
-    constructor(config: ConfigModule, tasks: TasksModule) {
+    /** GHO-207.2.3 — where harness mode answers a native agent's in-path questions for the person. */
+    readonly #userInput: UserInputModule | undefined;
+    /** GHO-207.2.3 — reads a repository's committed harness-mode file; replaceable in tests. */
+    readonly #readCommitted: (repoPath: string, file: string) => Promise<string | undefined>;
+
+    constructor(
+        config: ConfigModule,
+        tasks: TasksModule,
+        userInput?: UserInputModule,
+        readCommitted: (repoPath: string, file: string) => Promise<string | undefined> = gitShowHead,
+    ) {
         this.#config = config;
         this.#tasks = tasks;
+        this.#userInput = userInput;
+        this.#readCommitted = readCommitted;
+    }
+
+    /**
+     * GHO-207.2.3 — guard an agent that starts in a project's repository: under the project's harness mode its
+     * in-path native questions are answered for the owner; otherwise the GHO-204 repository guard holds. Returns
+     * whether harness mode applies. Never throws: a file it cannot read leaves harness mode off.
+     */
+    async #guardRepo(agentId: string, session: AttendedSession, repoPath: string): Promise<boolean> {
+        let applies = false;
+        if (this.#userInput !== undefined) {
+            const text = await this.#readCommitted(repoPath, HARNESS_MODE_FILE).catch(() => undefined);
+            applies = harnessModeApplies({
+                file: parseHarnessModeFile(text),
+                permissionMode: session.permissionMode,
+                startedBy: session.startedBy,
+            });
+        }
+        if (applies) {
+            this.#repoGuards.delete(agentId);
+            this.#userInput!.setNativeToolPolicy(agentId, (permission) =>
+                harnessModeAllows(repoPath, permission),
+            );
+        } else {
+            this.#userInput?.setNativeToolPolicy(agentId, undefined);
+            this.#repoGuards.set(agentId, { repoPath, cwd: repoPath });
+        }
+        return applies;
+    }
+
+    /** Drop an agent's repository guard and harness-mode policy. */
+    #unguard(agentId: string): void {
+        this.#repoGuards.delete(agentId);
+        this.#userInput?.setNativeToolPolicy(agentId, undefined);
     }
 
     /** For diagnostics: whether the owner runs, how many sessions it holds and the last failure. */
@@ -141,7 +194,14 @@ export class OrkestModule implements AgentModule {
                     ...(p.focus === undefined ? {} : { focus: p.focus }),
                     docs: p.docs,
                     // GHO-204 (D-33): where the agent starts, and the one place it may write.
-                    workingDirectory: { repoPath: p.repoPath, taskPath: p.taskPath },
+                    workingDirectory: {
+                        repoPath: p.repoPath,
+                        taskPath: p.taskPath,
+                        ...(p.harnessMode === true ? { harnessMode: true } : {}),
+                        ...(p.missingRepoPath === undefined
+                            ? {}
+                            : { missingRepoPath: p.missingRepoPath }),
+                    },
                     // GHO-205.6.1 (D-42): the context set read at open.
                     ...(p.context === undefined ? {} : { context: p.context }),
                 });
@@ -450,11 +510,10 @@ export class OrkestModule implements AgentModule {
         // that exists on this host, else an empty folder inside the task's own. A row with no project opens as before.
         const projectId = sessionProjectId(session);
         const placement = await placementFor(sessionRepoPath(session), isDirectory);
-        if (projectId !== undefined && placement.repoPath !== null)
-            this.#repoGuards.set(derivedId("a", session.runId), {
-                repoPath: placement.repoPath,
-                cwd: placement.repoPath,
-            });
+        const harnessMode =
+            projectId !== undefined && placement.repoPath !== null
+                ? await this.#guardRepo(derivedId("a", session.runId), session, placement.repoPath)
+                : false;
         // Identities derived from the run: a repeated delivery finds the same task.
         const task = await this.#tasks.create(ctx, {
             id: derivedId("t", session.runId),
@@ -471,13 +530,13 @@ export class OrkestModule implements AgentModule {
         const ack = await agency.acknowledge(session.intentId, task.id);
         if (!ack.ok) {
             // Cancelled before it opened, or acknowledged as another task: nothing of ours runs.
-            this.#repoGuards.delete(task.agentId);
+            this.#unguard(task.agentId);
             if (ack.final) await this.#archive(ctx, task.id);
             return;
         }
         const lease = await agency.claim(session.runId, workerId, LEASE_SECONDS);
         if (lease === undefined) {
-            this.#repoGuards.delete(task.agentId);
+            this.#unguard(task.agentId);
             await this.#archive(ctx, task.id);
             return;
         }
@@ -489,7 +548,13 @@ export class OrkestModule implements AgentModule {
             lastHeartbeat: Date.now(),
             openingModel: modelId,
             ...(isProjectSession(session)
-                ? { project: projectSessionState(session, task.path, placement.repoPath) }
+                ? {
+                      project: withPlacementNotes(
+                          projectSessionState(session, task.path, placement.repoPath),
+                          harnessMode,
+                          session,
+                      ),
+                  }
                 : {}),
         };
         this.#open.set(session.runId, opened);
@@ -533,10 +598,16 @@ export class OrkestModule implements AgentModule {
             if (task !== undefined)
                 project = projectSessionState(session, task.path, placement.repoPath);
         }
+        const agentId = derivedId("a", session.runId);
+        const harnessMode =
+            sessionProjectId(session) !== undefined && placement.repoPath !== null
+                ? await this.#guardRepo(agentId, session, placement.repoPath)
+                : false;
+        if (project !== undefined) project = withPlacementNotes(project, harnessMode, session);
         const open: OpenSession = {
             runId: session.runId,
             taskId: session.ownerJobRef,
-            agentId: derivedId("a", session.runId),
+            agentId,
             fence: lease.fence,
             lastHeartbeat: Date.now(),
             ...(HARNESS_MODELS[session.harness] === undefined
@@ -544,11 +615,6 @@ export class OrkestModule implements AgentModule {
                 : { openingModel: HARNESS_MODELS[session.harness] }),
             ...(project === undefined ? {} : { project }),
         };
-        if (sessionProjectId(session) !== undefined && placement.repoPath !== null)
-            this.#repoGuards.set(open.agentId, {
-                repoPath: placement.repoPath,
-                cwd: placement.repoPath,
-            });
         this.#open.set(session.runId, open);
         await this.#openProject(open);
         return open;
@@ -592,13 +658,13 @@ export class OrkestModule implements AgentModule {
         // One session consumed from the session budget, so usage is known.
         await agency.complete(open.runId, open.fence, reason);
         this.#open.delete(open.runId);
-        this.#repoGuards.delete(open.agentId);
+        this.#unguard(open.agentId);
     }
 
     async #drop(ctx: Context, open: OpenSession): Promise<void> {
         await this.#archive(ctx, open.taskId);
         this.#open.delete(open.runId);
-        this.#repoGuards.delete(open.agentId);
+        this.#unguard(open.agentId);
     }
 
     async #archive(ctx: Context, taskId: string): Promise<void> {
@@ -649,6 +715,32 @@ export class OrkestModule implements AgentModule {
             version,
         });
     }
+}
+
+/** GHO-207.2.3 — a file's committed text at HEAD of a repository, or undefined when it has none. */
+function gitShowHead(repoPath: string, file: string): Promise<string | undefined> {
+    return new Promise((resolve) => {
+        execFile(
+            "git",
+            ["-C", repoPath, "show", `HEAD:${file}`],
+            { encoding: "utf8", timeout: 10_000, windowsHide: true, maxBuffer: 64 * 1024 },
+            (error, stdout) => resolve(error ? undefined : stdout),
+        );
+    });
+}
+
+/** GHO-207.2.1 and .2.3 — what the session's placement adds to its project state: harness mode, a missing repo. */
+function withPlacementNotes(
+    project: ProjectSessionState,
+    harnessMode: boolean,
+    session: AttendedSession,
+): ProjectSessionState {
+    const named = sessionRepoPath(session);
+    return {
+        ...project,
+        ...(harnessMode ? { harnessMode: true } : {}),
+        ...(project.repoPath === null && named !== undefined ? { missingRepoPath: named } : {}),
+    };
 }
 
 /** A stable Happy identity for one run: lowercase, starts with a letter, 26 characters. */

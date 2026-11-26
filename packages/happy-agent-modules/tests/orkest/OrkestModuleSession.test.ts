@@ -519,6 +519,91 @@ describe("Orkest project session tools on Happy (GHO-196.2.2)", () => {
         expect(provider.sessions[0]!.options.instructions).toContain(`${task.path}/project`);
     }, 90_000);
 
+    // GHO-207.2.1 — the person is told when the project's repository is not on this host.
+    it("tells the agent to say so first when the named repository is not on this host", async () => {
+        const missing = join(tmpdirFor(), "not-on-this-host-either");
+        const father = await fakeFather({ ...SCOPE, repoPath: missing });
+        const dashboard = await fakeDashboard();
+        const { runtime, provider } = await happy(father.url, dashboard.url, [textTurn("Noted.")]);
+        await openTask(runtime, father);
+        await say(runtime, "Where are we?", "m1");
+        await expect.poll(() => requests(provider).length, { timeout: 20_000 }).toBeGreaterThan(0);
+        const instructions = provider.sessions[0]!.options.instructions;
+        expect(instructions).toContain(
+            `Note: this project's repository (${missing}) is not on this host, so this chat is not running in the project folder.`,
+        );
+        expect(instructions).toContain("Begin your first reply with exactly that sentence");
+    }, 90_000);
+
+    // GHO-207.2.3 — a project's committed harness mode answers the owner's in-path native questions.
+    it("turns on the project's committed harness mode for its owner, and only for in-path local actions", async () => {
+        const repo = await committedRepo({ ".orkest/harness-mode.json": '{"schema":1,"enabled":true,"owners":["ghostshell:syn-person"]}\n' });
+        const father = await fakeFather({ ...SCOPE, repoPath: repo });
+        const dashboard = await fakeDashboard();
+        const { runtime, provider } = await happy(father.url, dashboard.url, [textTurn("Ready.")]);
+        await openTask(runtime, father);
+        await say(runtime, "Hello.", "m1");
+        await expect.poll(() => requests(provider).length, { timeout: 20_000 }).toBeGreaterThan(0);
+        const instructions = provider.sessions[0]!.options.instructions;
+        expect(instructions).toContain("with the project's harness mode on");
+        expect(instructions).not.toContain("Never write, delete or run commands that change files there");
+
+        const ctx = dbCtx(runtime);
+        const agent = derivedId("a", RUN);
+        const ask = (action: string, input: unknown, signal: AbortSignal) =>
+            runtime.modules.userInput.askForNativeToolPermission(
+                ctx,
+                agent,
+                { provider: "claude", providerTitle: "Claude Code", action, input, inputDigest: "sha256:" + "0".repeat(64) },
+                signal,
+            );
+        expect(await ask(`Write: ${join(repo, "notes.txt")}`, { file_path: join(repo, "notes.txt") }, new AbortController().signal)).toBe(true);
+        expect(await ask("Bash: git add notes.txt && git commit -m n", { command: "git add notes.txt && git commit -m n" }, new AbortController().signal)).toBe(true);
+        expect(await runtime.modules.userInput.list(ctx, agent, {})).toEqual([]);
+        // A push still reaches the person.
+        const stop = new AbortController();
+        const push = ask("Bash: git push", { command: "git push" }, stop.signal);
+        await expect
+            .poll(async () => (await runtime.modules.userInput.list(ctx, agent, { status: "pending" })).length, { timeout: 10_000 })
+            .toBe(1);
+        stop.abort();
+        expect(await push).toBe(false);
+    }, 90_000);
+
+    it("keeps harness mode off for an uncommitted file, another owner, or a read-only session", async () => {
+        const cases = [
+            { files: {}, loose: '{"schema":1,"enabled":true}', extra: {} },
+            { files: { ".orkest/harness-mode.json": '{"schema":1,"enabled":true,"owners":["ghostshell:someone-else"]}' }, extra: {} },
+            { files: { ".orkest/harness-mode.json": '{"schema":1,"enabled":true}' }, extra: { permissionMode: "read_only" } },
+        ];
+        for (const c of cases) {
+            const repo = await committedRepo(c.files);
+            if (c.loose) {
+                await mkdir(join(repo, ".orkest"), { recursive: true });
+                await writeFile(join(repo, ".orkest/harness-mode.json"), c.loose);
+            }
+            const father = await fakeFather({ ...SCOPE, repoPath: repo }, c.extra);
+            const dashboard = await fakeDashboard();
+            const { runtime, provider } = await happy(father.url, dashboard.url, [textTurn("Ready.")]);
+            await openTask(runtime, father);
+            await say(runtime, "Hello.", "m1");
+            await expect.poll(() => requests(provider).length, { timeout: 20_000 }).toBeGreaterThan(0);
+            expect(provider.sessions[0]!.options.instructions).not.toContain("harness mode on");
+            const stop = new AbortController();
+            const write = runtime.modules.userInput.askForNativeToolPermission(
+                dbCtx(runtime),
+                derivedId("a", RUN),
+                { provider: "claude", providerTitle: "Claude Code", action: "Write: notes.txt", input: { file_path: join(repo, "notes.txt") }, inputDigest: "sha256:" + "0".repeat(64) },
+                stop.signal,
+            );
+            await expect
+                .poll(async () => (await runtime.modules.userInput.list(dbCtx(runtime), derivedId("a", RUN), { status: "pending" })).length, { timeout: 10_000 })
+                .toBe(1);
+            stop.abort();
+            expect(await write).toBe(false);
+        }
+    }, 240_000);
+
     it("starts a ticket session of a project in its repository and still drafts the work item", async () => {
         const repo = await mkdtemp(join(inject("orkestFixtureRoot"), "repo-"));
         const father = await fakeFather(
@@ -555,6 +640,23 @@ describe("Orkest project session tools on Happy (GHO-196.2.2)", () => {
         expect(config?.metadata?.["orkestProjectId"]).toBeUndefined();
     }, 90_000);
 });
+
+/** A git repository in the fixture root with these files committed. */
+async function committedRepo(files: Record<string, string>): Promise<string> {
+    const { execFileSync } = await import("node:child_process");
+    const repo = await mkdtemp(join(inject("orkestFixtureRoot"), "repo-"));
+    await writeFile(join(repo, "README.md"), "# repo\n");
+    for (const [name, text] of Object.entries(files)) {
+        await mkdir(dirname(join(repo, name)), { recursive: true });
+        await writeFile(join(repo, name), text);
+    }
+    const git = (...args: string[]) =>
+        execFileSync("git", ["-C", repo, "-c", "user.name=syn", "-c", "user.email=syn@example.invalid", ...args], { stdio: "ignore" });
+    git("init", "-q", "-b", "main");
+    git("add", "-A");
+    git("commit", "-q", "-m", "synthetic");
+    return repo;
+}
 
 function tmpdirFor(): string {
     return inject("orkestFixtureRoot");

@@ -155,7 +155,7 @@ function firstString(args: Record<string, unknown>, keys: readonly string[]): st
     return undefined;
 }
 
-function windowsLike(path: string): boolean {
+export function windowsLike(path: string): boolean {
     return /^[A-Za-z]:[\\/]/.test(path) || path.includes("\\");
 }
 
@@ -163,7 +163,7 @@ function windowsLike(path: string): boolean {
  * A path as a comparable string: forward slashes, dot segments resolved, no trailing slash, case folded when the
  * paths are Windows paths. Relative paths resolve against `cwd`; undefined for what cannot be resolved (`~`, empty).
  */
-function canonical(path: string, cwd: string | undefined, fold: boolean): string | undefined {
+export function canonical(path: string, cwd: string | undefined, fold: boolean): string | undefined {
     let text = path.trim().replaceAll("\\", "/");
     if (text.length === 0 || text.startsWith("~") || text.includes("$")) return undefined;
     // Git Bash writes C:/x as /c/x.
@@ -181,7 +181,7 @@ function canonical(path: string, cwd: string | undefined, fold: boolean): string
     return fold ? out.toLowerCase() : out;
 }
 
-function isUnder(path: string, repo: string): boolean {
+export function isUnder(path: string, repo: string): boolean {
     return path === repo || path.startsWith(`${repo}/`);
 }
 
@@ -336,7 +336,7 @@ const CD_VERBS = new Set(["cd", "chdir", "pushd", "set-location", "sl"]);
 const IGNORED_TARGETS = new Set(["/dev/null", "nul", "$null", "/dev/stdout", "/dev/stderr"]);
 
 /** Split a command line into simple commands, each a list of words with quotes removed. */
-function simpleCommands(line: string): string[][] {
+export function simpleCommands(line: string): string[][] {
     const commands: string[][] = [];
     let words: string[] = [];
     let word = "";
