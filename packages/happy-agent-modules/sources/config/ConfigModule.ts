@@ -3750,11 +3750,15 @@ export class ConfigModule implements AgentModule {
         if (workerToken.length === 0) return undefined;
         const workRoot = value("ORKEST_AFK_WORK_ROOT");
         const repo = value("ORKEST_AFK_REPO");
+        const tenant = value("ORKEST_AFK_TENANT");
+        const projectsFile = value("ORKEST_AFK_PROJECTS_FILE");
         return {
             url: url.replace(/\/+$/, ""),
             workerToken,
             workerId: value("ORKEST_AFK_WORKER_ID") ?? `happy-afk:${hostname()}`,
             model,
+            ...(tenant === undefined ? {} : { tenant }),
+            ...(projectsFile === undefined ? {} : { projectsFile }),
             ...(workRoot === undefined ? {} : { workRoot }),
             ...(repo === undefined ? {} : { repo }),
         };

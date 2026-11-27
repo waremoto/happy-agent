@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, rmdir, symlink } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { lstat, mkdir, realpath, rmdir, symlink } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -32,6 +32,15 @@ import {
     type AfkRun,
     type OrkestAfkEndpoint,
 } from "./impl/OrkestAfkClient.js";
+import {
+    acquireOrkestAfkProjectLock,
+    projectPathsResolveInside,
+    projectPathIsProtected,
+    projectRuleDecision,
+    resolveOrkestAfkProject,
+    type OrkestAfkProject,
+    type OrkestAfkProjectLockRelease,
+} from "./impl/OrkestAfkProjects.js";
 
 /** How often the owner reads Orkest, and how often a waiting call re-reads its approval. */
 const POLL_MS = 2_000;
@@ -124,6 +133,8 @@ interface HeldRun {
     readonly agentId: string;
     /** The task folder the agent works in; read-only tools run unasked only inside it. */
     readonly directory: string;
+    readonly project: OrkestAfkProject | undefined;
+    readonly releaseProjectLock: OrkestAfkProjectLockRelease | undefined;
     fence: number;
     lastHeartbeat: number;
     lastProgress: number;
@@ -239,7 +250,11 @@ export class OrkestAfkModule implements AgentModule {
         this.#stop.abort();
         await this.#loop?.catch(() => undefined);
         await Promise.all(
-            [...this.#held.values()].map((held) => held.ending?.catch(() => undefined)),
+            [...this.#held.values()].map(async (held) => {
+                await held.ending?.catch(() => undefined);
+                held.lost = true;
+                await held.releaseProjectLock?.();
+            }),
         );
     }
 
@@ -291,7 +306,6 @@ export class OrkestAfkModule implements AgentModule {
         while (!this.#stop.signal.aborted) {
             try {
                 await this.#tick(ctx, client, endpoint, mode);
-                this.#lastError = null;
             } catch (error) {
                 if (isAbortedError(error) || this.#stop.signal.aborted) return;
                 // Orkest or the task store was unavailable; the next tick retries from durable state.
@@ -311,36 +325,62 @@ export class OrkestAfkModule implements AgentModule {
         endpoint: OrkestAfkEndpoint,
         mode: MessageMode,
     ): Promise<void> {
+        let failedRun = false;
         // Runs this worker already holds, including after its own restart.
         for (const run of await client.active()) {
             if (this.#stop.signal.aborted) return;
-            const held =
-                this.#held.get(run.runId) ??
-                (await this.#reclaim(ctx, client, endpoint, mode, run));
-            if (held === undefined || held.ending !== undefined) continue;
-            if (run.stopRequestedAt !== null) {
-                held.stopRequested = true;
-                await this.#end(held, "stopped");
+            try {
+                const held =
+                    this.#held.get(run.runId) ??
+                    (await this.#reclaim(ctx, client, endpoint, mode, run));
+                if (held === undefined || held.ending !== undefined) continue;
+                if (run.stopRequestedAt !== null) {
+                    held.stopRequested = true;
+                    await this.#end(held, "stopped");
+                }
+            } catch (error) {
+                if (isAbortedError(error) || this.#stop.signal.aborted) return;
+                failedRun = true;
+                this.#lastError = error instanceof Error ? error.message : String(error);
             }
         }
         for (const run of await client.pending()) {
             if (this.#stop.signal.aborted) return;
             if (run.intentId === null || this.#held.has(run.runId)) continue;
-            await this.#start(ctx, client, endpoint, mode, run, run.intentId);
+            try {
+                await this.#start(ctx, client, endpoint, mode, run, run.intentId);
+            } catch (error) {
+                if (isAbortedError(error) || this.#stop.signal.aborted) return;
+                failedRun = true;
+                this.#lastError = error instanceof Error ? error.message : String(error);
+            }
         }
         const now = Date.now();
         for (const held of this.#held.values()) {
-            if (held.ending !== undefined) continue;
-            if (held.declinedAt !== undefined && now - held.declinedAt > DECLINE_GRACE_MS) {
-                await this.#end(held, "declined");
-                continue;
+            try {
+                if (held.ending !== undefined) continue;
+                if (held.releaseProjectLock !== undefined && !held.releaseProjectLock.isHeld()) {
+                    held.lost = true;
+                    failedRun = true;
+                    this.#lastError = `Project lock lost for ${held.workLabel}.`;
+                    await this.#end(held, "failed", "project lock lost");
+                    continue;
+                }
+                if (held.declinedAt !== undefined && now - held.declinedAt > DECLINE_GRACE_MS) {
+                    await this.#end(held, "declined");
+                    continue;
+                }
+                if (now - held.lastHeartbeat < HEARTBEAT_MS) continue;
+                const result = await client.heartbeat(held.runId, held.fence, LEASE_SECONDS);
+                if (result.ok) held.lastHeartbeat = now;
+                else if (result.final) await this.#drop(ctx, held);
+            } catch (error) {
+                if (isAbortedError(error) || this.#stop.signal.aborted) return;
+                failedRun = true;
+                this.#lastError = error instanceof Error ? error.message : String(error);
             }
-            if (now - held.lastHeartbeat < HEARTBEAT_MS) continue;
-            const result = await client.heartbeat(held.runId, held.fence, LEASE_SECONDS);
-            if (result.ok) held.lastHeartbeat = now;
-            // Revoked, superseded or gone: this process no longer owns the run.
-            else if (result.final) await this.#drop(ctx, held);
         }
+        if (!failedRun) this.#lastError = null;
     }
 
     async #start(
@@ -351,21 +391,29 @@ export class OrkestAfkModule implements AgentModule {
         run: AfkRun,
         intentId: string,
     ): Promise<void> {
-        const task = await this.#task(ctx, endpoint, mode, run);
-        const ack = await client.acknowledge(intentId, task.id);
-        if (!ack.ok) {
-            // Cancelled before it opened, or acknowledged as another task: nothing of ours runs.
-            if (ack.final) await this.#archive(ctx, task.id);
-            return;
+        const project = await this.#project(endpoint, run);
+        const releaseLock =
+            project === undefined ? undefined : await acquireOrkestAfkProjectLock(project.lockPath);
+        let transferred = false;
+        try {
+            const task = await this.#task(ctx, endpoint, mode, run, project);
+            const ack = await client.acknowledge(intentId, task.id);
+            if (!ack.ok) {
+                if (ack.final) await this.#archive(ctx, task.id);
+                return;
+            }
+            const lease = await client.claim(run.runId, LEASE_SECONDS);
+            if (lease === undefined) {
+                await this.#archive(ctx, task.id);
+                return;
+            }
+            const held = this.#hold(run, task, lease.fence, project, releaseLock);
+            transferred = true;
+            await this.#sendBrief(ctx, held, mode, run);
+            await this.#progress(held, "Started", true);
+        } finally {
+            if (!transferred) await releaseLock?.();
         }
-        const lease = await client.claim(run.runId, LEASE_SECONDS);
-        if (lease === undefined) {
-            await this.#archive(ctx, task.id);
-            return;
-        }
-        const held = this.#hold(run, task, lease.fence);
-        await this.#sendBrief(ctx, held, mode, run);
-        await this.#progress(held, "Started", true);
     }
 
     /**
@@ -382,34 +430,75 @@ export class OrkestAfkModule implements AgentModule {
     ): Promise<HeldRun | undefined> {
         const taskId = afkDerivedId("t", run.runId);
         if (run.ownerJobRef !== null && run.ownerJobRef !== taskId) return undefined;
-        const lease = await client.claim(run.runId, LEASE_SECONDS);
-        if (lease === undefined) return undefined;
-        const task = await this.#task(ctx, endpoint, mode, run);
-        const held = this.#hold(run, task, lease.fence);
-        const brief = await this.#sendBrief(ctx, held, mode, run);
-        if (brief === "existing") {
-            await this.#send(
-                ctx,
-                held,
-                mode,
-                "This Orkest worker restarted. Any tool call that was in flight when it stopped did not run. Continue the work item from where you stopped; when you are done, reply with a short summary of what you changed.",
-                afkDerivedId("m", `${run.runId}:resume:${lease.fence}`),
-            );
-            await this.#progress(held, "Resumed after a worker restart", true);
-        } else {
-            await this.#progress(held, "Started", true);
+        const project = await this.#project(endpoint, run);
+        const releaseLock =
+            project === undefined ? undefined : await acquireOrkestAfkProjectLock(project.lockPath);
+        let transferred = false;
+        try {
+            const existingTask = await this.#tasks.get(ctx, taskId);
+            if (existingTask !== undefined && project !== undefined) {
+                await this.#assertTaskWorkingDirectory(ctx, existingTask, project);
+            }
+            const lease = await client.claim(run.runId, LEASE_SECONDS);
+            if (lease === undefined) return undefined;
+            const task = await this.#task(ctx, endpoint, mode, run, project);
+            const held = this.#hold(run, task, lease.fence, project, releaseLock);
+            transferred = true;
+            const brief = await this.#sendBrief(ctx, held, mode, run);
+            if (brief === "existing") {
+                await this.#send(
+                    ctx,
+                    held,
+                    mode,
+                    "This Orkest worker restarted. Any tool call that was in flight when it stopped did not run. Continue the work item from where you stopped; when you are done, reply with a short summary of what you changed.",
+                    afkDerivedId("m", `${run.runId}:resume:${lease.fence}`),
+                );
+                await this.#progress(held, "Resumed after a worker restart", true);
+            } else {
+                await this.#progress(held, "Started", true);
+            }
+            return held;
+        } finally {
+            if (!transferred) await releaseLock?.();
         }
-        return held;
     }
 
-    #hold(run: AfkRun, task: TaskRecord, fence: number): HeldRun {
+    async #project(
+        endpoint: OrkestAfkEndpoint,
+        run: AfkRun,
+    ): Promise<OrkestAfkProject | undefined> {
+        const projectId = run.projectId ?? undefined;
+        if (projectId !== undefined) {
+            return await resolveOrkestAfkProject(endpoint.projectsFile, endpoint.tenant, projectId);
+        }
+        if (endpoint.repo === undefined) return undefined;
+        const projectPath = await realpath(endpoint.repo);
+        return {
+            id: projectPath,
+            path: projectPath,
+            policyRevision: "",
+            allowedRules: [],
+            deniedRules: [],
+            lockPath: join(projectPath, ".run.lock"),
+        };
+    }
+
+    #hold(
+        run: AfkRun,
+        task: TaskRecord,
+        fence: number,
+        project: OrkestAfkProject | undefined,
+        releaseProjectLock: OrkestAfkProjectLockRelease | undefined,
+    ): HeldRun {
         const held: HeldRun = {
             runId: run.runId,
             title: run.title,
             workLabel: run.workLabel,
             taskId: task.id,
             agentId: task.agentId,
-            directory: task.path,
+            directory: project?.path ?? task.path,
+            project,
+            releaseProjectLock,
             fence,
             lastHeartbeat: Date.now(),
             lastProgress: 0,
@@ -433,6 +522,7 @@ export class OrkestAfkModule implements AgentModule {
         endpoint: OrkestAfkEndpoint,
         mode: MessageMode,
         run: AfkRun,
+        project: OrkestAfkProject | undefined,
     ): Promise<TaskRecord> {
         const task = await this.#tasks.create(ctx, {
             id: afkDerivedId("t", run.runId),
@@ -441,9 +531,33 @@ export class OrkestAfkModule implements AgentModule {
             name: run.title.slice(0, 120),
             folderName: afkFolderName(run.runId),
             mode,
+            ...(run.projectId == null ? {} : { projectId: run.projectId }),
+            ...(project === undefined ? {} : { workingDirectory: project.path }),
         });
-        await this.#prepareWorkDirectory(endpoint, task);
+        if (project === undefined) await this.#prepareWorkDirectory(endpoint, task);
+        if (project !== undefined) await this.#assertTaskWorkingDirectory(ctx, task, project);
         return task;
+    }
+
+    async #assertTaskWorkingDirectory(
+        ctx: Context,
+        task: TaskRecord,
+        project: OrkestAfkProject,
+    ): Promise<void> {
+        const config = await this.#agents?.config(ctx, task.agentId);
+        const workingDirectory = config?.environment?.workingDirectory;
+        if (typeof workingDirectory !== "string") {
+            throw new Error("The bound project task has no recorded working directory.");
+        }
+        const actual = await realpath(workingDirectory).catch(() => "");
+        const matches =
+            actual !== "" &&
+            (process.platform === "win32"
+                ? resolve(actual).toLowerCase() === resolve(project.path).toLowerCase()
+                : resolve(actual) === resolve(project.path));
+        if (!matches) {
+            throw new Error("The existing task is bound to a different project directory.");
+        }
     }
 
     /**
@@ -539,9 +653,82 @@ export class OrkestAfkModule implements AgentModule {
                 "A person already declined an action in this run; nothing else runs. Stop.",
             );
         }
+        if (held.releaseProjectLock !== undefined && !held.releaseProjectLock.isHeld()) {
+            held.lost = true;
+            await this.#end(held, "failed", "project lock lost");
+            return refusal("The assigned project lock was lost. This action did not run.");
+        }
+        const pathScope =
+            held.project === undefined
+                ? undefined
+                : await projectPathsResolveInside(held.project.path, tool, call.arguments);
+        const pathCandidates = pathScope?.paths.map((candidate) => {
+            return relative(held.project!.path, candidate).replaceAll("\\", "/");
+        });
+        const writesProtectedPath =
+            (tool === "Write" || tool === "Edit") &&
+            pathCandidates?.some(projectPathIsProtected) === true;
+        if (writesProtectedPath) {
+            held.toolCalls.push({ tool, inputSha256, decision: "denied" });
+            return refusal("Project control files cannot be changed by an AFK run.");
+        }
+        const explicitlyDenied =
+            held.project !== undefined &&
+            (projectRuleDecision(held.project.deniedRules, tool) ||
+                pathCandidates?.some((candidate) =>
+                    projectRuleDecision(held.project!.deniedRules, tool, candidate),
+                ) === true ||
+                held.project.deniedRules.some((rule) => {
+                    if (!rule.startsWith(`${tool}(`)) return false;
+                    const supportedPathRule = [
+                        "Read",
+                        "Glob",
+                        "Grep",
+                        "ReadMediaFile",
+                        "read_file",
+                        "list_dir",
+                        "grep",
+                        "Write",
+                        "Edit",
+                    ].includes(tool);
+                    return (
+                        !supportedPathRule ||
+                        (pathScope?.inside === false && rule === `${tool}(//**)`)
+                    );
+                }));
+        if (explicitlyDenied) {
+            held.toolCalls.push({ tool, inputSha256, decision: "denied" });
+            return refusal("The trusted project settings deny this action. It did not run.");
+        }
+        const allowlisted =
+            held.project !== undefined &&
+            projectRuleDecision(held.project.allowedRules, tool) &&
+            pathScope?.inside === true;
+        const allowedByPath =
+            held.project !== undefined &&
+            pathScope?.inside === true &&
+            (pathCandidates?.length ?? 0) > 0 &&
+            pathCandidates!.every((candidate) =>
+                projectRuleDecision(held.project!.allowedRules, tool, candidate),
+            );
         if (
             AFK_READ_ONLY_TOOLS.has(tool) &&
+            (held.project === undefined || pathScope?.inside === true) &&
+            (held.project === undefined || allowlisted || allowedByPath) &&
             afkReadStaysInside(tool, held.directory, call.arguments)
+        ) {
+            held.toolCalls.push({ tool, inputSha256, decision: "ran" });
+            await this.#progress(held, `Running: ${tool}`);
+            return { type: "run" };
+        }
+        const dangerousWrite =
+            call.arguments !== null &&
+            typeof call.arguments === "object" &&
+            (call.arguments as Record<string, unknown>).dangerouslyDisableSandbox === true;
+        if (
+            (tool === "Write" || tool === "Edit") &&
+            !dangerousWrite &&
+            (allowlisted || allowedByPath)
         ) {
             held.toolCalls.push({ tool, inputSha256, decision: "ran" });
             await this.#progress(held, `Running: ${tool}`);
@@ -591,6 +778,45 @@ export class OrkestAfkModule implements AgentModule {
             answeredBy: approval.answeredBy ?? null,
         });
         if (approval.state === "approved") {
+            const approvedPathScope =
+                held.project === undefined
+                    ? undefined
+                    : await projectPathsResolveInside(held.project.path, tool, call.arguments);
+            const approvedPathCandidates = approvedPathScope?.paths.map((candidate) =>
+                relative(held.project!.path, candidate).replaceAll("\\", "/"),
+            );
+            const deniedAfterApproval =
+                held.project !== undefined &&
+                (projectRuleDecision(held.project.deniedRules, tool) ||
+                    approvedPathCandidates?.some((candidate) =>
+                        projectRuleDecision(held.project!.deniedRules, tool, candidate),
+                    ) === true ||
+                    (approvedPathScope?.inside === false &&
+                        held.project.deniedRules.some((rule) => rule.startsWith(`${tool}(`))));
+            if (held.releaseProjectLock !== undefined && !held.releaseProjectLock.isHeld()) {
+                held.lost = true;
+                await this.#end(held, "failed", "project lock lost");
+                return refusal("The assigned project lock was lost. This action did not run.");
+            }
+            if (
+                held.project !== undefined &&
+                (deniedAfterApproval ||
+                    approvedPathScope?.inside !== true ||
+                    (!["Write", "Edit"].includes(tool) && !AFK_READ_ONLY_TOOLS.has(tool)) ||
+                    dangerousWrite ||
+                    ((tool === "Write" || tool === "Edit") &&
+                        approvedPathCandidates?.some(projectPathIsProtected) === true))
+            ) {
+                held.toolCalls.push({ tool, inputSha256, decision: "denied" });
+                await this.#progress(
+                    held,
+                    `Blocked outside the supported project scope: ${tool}`,
+                    true,
+                );
+                return refusal(
+                    "This approved action cannot be safely confined to the assigned project. It did not run.",
+                );
+            }
             held.toolCalls.push({ tool, inputSha256, decision: "approved" });
             await this.#progress(held, `Approved: ${tool}`, true);
             return { type: "run" };
@@ -695,6 +921,7 @@ export class OrkestAfkModule implements AgentModule {
                     : { kind: "failed", reason: (error ?? "failed").slice(0, 200) };
         await client.complete(held.runId, held.fence, completion);
         this.#held.delete(held.runId);
+        await held.releaseProjectLock?.();
     }
 
     #receipt(held: HeldRun, outcome: Outcome): Record<string, unknown> {
@@ -714,6 +941,7 @@ export class OrkestAfkModule implements AgentModule {
         held.lost = true;
         await this.#archive(ctx, held.taskId);
         this.#held.delete(held.runId);
+        await held.releaseProjectLock?.();
     }
 
     async #forget(ctx: Context, held: HeldRun): Promise<void> {

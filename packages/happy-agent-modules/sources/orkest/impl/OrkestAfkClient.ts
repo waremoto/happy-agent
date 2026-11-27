@@ -12,6 +12,10 @@ export interface OrkestAfkEndpoint {
     readonly url: string;
     readonly workerToken: string;
     readonly workerId: string;
+    /** Worker-local tenant identity matched against the trusted project map. */
+    readonly tenant?: string;
+    /** Path to the operator-owned project ID to repository mapping. */
+    readonly projectsFile?: string;
     /** `ORKEST_AFK_MODEL` as written: `<providerId>:<modelId>`, or a model id the catalog knows. */
     readonly model: string;
     /** Optional root for per-run work directories. */
@@ -29,6 +33,8 @@ export const afkRunSchema = Type.Object({
     title: Type.String({ minLength: 1, maxLength: 300 }),
     brief: Type.String({ maxLength: 20_000 }),
     workLabel: Type.String(),
+    /** Server-derived project identity. Missing only on runs admitted before project binding. */
+    projectId: Type.Optional(nullableString),
     stopRequestedAt: nullableString,
     intentId: nullableString,
     ownerJobRef: nullableString,

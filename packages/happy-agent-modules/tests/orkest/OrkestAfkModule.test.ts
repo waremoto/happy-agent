@@ -1,7 +1,17 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, realpath, rm, rmdir, unlink, writeFile } from "node:fs/promises";
+import {
+    mkdir,
+    mkdtemp,
+    readFile,
+    realpath,
+    rm,
+    rmdir,
+    symlink,
+    unlink,
+    writeFile,
+} from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -75,7 +85,13 @@ interface ApprovalRow {
  * Father's AFK lane, in memory: one unattended run queued for a worker. It answers only the right
  * service token together with the right worker token, and records every call.
  */
-async function fakeAfkAgency(options: { autoAnswer?: "approved" | "denied" } = {}) {
+async function fakeAfkAgency(
+    options: {
+        autoAnswer?: "approved" | "denied";
+        projectId?: string;
+        additionalRuns?: Array<{ runId: string; intentId: string; projectId?: string }>;
+    } = {},
+) {
     const calls: Call[] = [];
     const approvals = new Map<string, ApprovalRow>();
     const run = {
@@ -86,17 +102,36 @@ async function fakeAfkAgency(options: { autoAnswer?: "approved" | "denied" } = {
         title: "WAR-9: Say hello",
         brief: "Create hello.txt containing the word hello.",
         workLabel: "WAR-9",
+        ...(options.projectId === undefined ? {} : { projectId: options.projectId }),
         workProvider: "orkest",
         workExternalId: "WAR-9",
         createdBy: "human-1",
         createdAt: "2026-11-22T10:00:00Z",
         stopRequestedAt: null as string | null,
+        intent: "pending" as "pending" | "acknowledged",
         intentId: INTENT as string | null,
         ownerJobRef: null as string | null,
         leaseHolder: null as string | null,
         fence: 0,
     };
-    let intent: "pending" | "acknowledged" = "pending";
+    const runs = [
+        run,
+        ...(options.additionalRuns ?? []).map((additional) => ({
+            ...run,
+            ...additional,
+            title: `${additional.runId}: Additional test run`,
+            brief: "Complete the additional test run.",
+            workLabel: additional.runId,
+            workExternalId: additional.runId,
+            state: "admitted",
+            stateReason: null,
+            stopRequestedAt: null,
+            intent: "pending" as const,
+            ownerJobRef: null,
+            leaseHolder: null,
+            fence: 0,
+        })),
+    ];
     const read = async (request: IncomingMessage) => {
         let text = "";
         for await (const chunk of request) text += chunk;
@@ -124,51 +159,75 @@ async function fakeAfkAgency(options: { autoAnswer?: "approved" | "denied" } = {
         if (header("x-ghost-service-token") !== undefined) return send(401, {});
         if (header("x-orkest-worker-token") !== WORKER_TOKEN) return send(401, {});
         const path = url.pathname;
-        const fenced = () => (body as { fence?: number } | null)?.fence === run.fence;
-        const live = () => run.state === "running";
+        const pathRun = /^\/internal\/agency\/(?:runs|afk)\/([^/]+)/.exec(path)?.[1] ?? undefined;
+        const targetRun = runs.find((candidate) => candidate.runId === pathRun) ?? run;
+        const fenced = () => (body as { fence?: number } | null)?.fence === targetRun.fence;
+        const live = () => targetRun.state === "running";
         if (path === "/internal/agency/afk/pending") {
-            return send(200, intent === "pending" ? [run] : []);
+            return send(
+                200,
+                runs.filter((candidate) => candidate.intent === "pending"),
+            );
         }
         if (path === "/internal/agency/afk/active") {
-            const mine = intent === "acknowledged" && ["dispatched", "running"].includes(run.state);
-            return send(200, mine ? [run] : []);
+            return send(
+                200,
+                runs.filter(
+                    (candidate) =>
+                        candidate.intent === "acknowledged" &&
+                        ["dispatched", "running"].includes(candidate.state),
+                ),
+            );
         }
-        if (path === `/internal/agency/intents/${INTENT}/ack`) {
-            intent = "acknowledged";
-            run.ownerJobRef = (body as { ownerJobRef: string }).ownerJobRef;
-            run.state = "dispatched";
+        const ack = /^\/internal\/agency\/intents\/([^/]+)\/ack$/.exec(path);
+        const ackRun = ack && runs.find((candidate) => candidate.intentId === ack[1]);
+        if (ackRun) {
+            ackRun.intent = "acknowledged";
+            ackRun.ownerJobRef = (body as { ownerJobRef: string }).ownerJobRef;
+            ackRun.state = "dispatched";
             return send(200, { status: "Ok" });
         }
-        if (path === `/internal/agency/runs/${RUN}/claim`) {
-            if (!["dispatched", "running"].includes(run.state)) return send(409, {});
-            run.state = "running";
-            run.fence += 1;
-            run.leaseHolder = (body as { workerId: string }).workerId;
-            return send(200, {
-                status: "Ok",
-                runId: RUN,
-                attempt: run.fence,
-                fenceToken: run.fence,
-                expiresAt: "2026-11-22T10:02:00Z",
-            });
+        const runAction =
+            /^\/internal\/agency\/runs\/([^/]+)\/(claim|heartbeat|publish|artifacts|complete)$/.exec(
+                path,
+            );
+        if (runAction) {
+            if (runAction[2] === "claim") {
+                if (!["dispatched", "running"].includes(targetRun.state)) return send(409, {});
+                targetRun.state = "running";
+                targetRun.fence += 1;
+                targetRun.leaseHolder = (body as { workerId: string }).workerId;
+                return send(200, {
+                    status: "Ok",
+                    runId: targetRun.runId,
+                    attempt: targetRun.fence,
+                    fenceToken: targetRun.fence,
+                    expiresAt: "2026-11-22T10:02:00Z",
+                });
+            }
+            if (runAction[2] === "heartbeat" || runAction[2] === "publish") {
+                return fenced() && live() ? send(200, { status: "Ok" }) : send(409, {});
+            }
+            if (runAction[2] === "artifacts") {
+                return fenced() && live() ? send(201, { artifactId: "art-1" }) : send(409, {});
+            }
+            if (runAction[2] === "complete") {
+                if (!fenced() || !live()) return send(409, {});
+                const done = body as { proposed: boolean; outcome?: string };
+                targetRun.state = done.proposed ? "proposed" : (done.outcome ?? "failed");
+                return send(200, { status: "Ok" });
+            }
         }
-        if (path === `/internal/agency/runs/${RUN}/heartbeat`) {
-            return fenced() && live() ? send(200, { status: "Ok" }) : send(409, {});
-        }
-        if (path === `/internal/agency/runs/${RUN}/publish`) {
-            return fenced() && live() ? send(200, { status: "Ok" }) : send(409, {});
-        }
-        if (path === `/internal/agency/runs/${RUN}/artifacts`) {
-            return fenced() && live() ? send(201, { artifactId: "art-1" }) : send(409, {});
-        }
-        if (path === `/internal/agency/afk/${RUN}/approvals` && request.method === "POST") {
+        const approvalRoute = /^\/internal\/agency\/afk\/([^/]+)\/approvals(?:\/(.+))?$/.exec(path);
+        if (approvalRoute && request.method === "POST" && approvalRoute[2] === undefined) {
             if (!fenced() || !live()) return send(409, {});
             const ask = body as Omit<ApprovalRow, "approvalId" | "runId" | "state">;
-            const existing = approvals.get(ask.key);
+            const approvalKey = `${targetRun.runId}:${ask.key}`;
+            const existing = approvals.get(approvalKey);
             if (existing) return send(200, existing);
             const row: ApprovalRow = {
                 approvalId: `approval-${approvals.size + 1}`,
-                runId: RUN,
+                runId: targetRun.runId,
                 key: ask.key,
                 tool: ask.tool,
                 state: options.autoAnswer ?? "pending",
@@ -179,19 +238,13 @@ async function fakeAfkAgency(options: { autoAnswer?: "approved" | "denied" } = {
                 inputSha256: ask.inputSha256,
                 inputPreview: ask.inputPreview,
             };
-            approvals.set(row.key, row);
+            approvals.set(approvalKey, row);
             return send(200, row);
         }
-        const approval = new RegExp(`^/internal/agency/afk/${RUN}/approvals/(.+)$`).exec(path);
-        if (approval && request.method === "GET") {
-            const row = approvals.get(decodeURIComponent(approval[1]!));
+        if (approvalRoute && request.method === "GET" && approvalRoute[2] !== undefined) {
+            const key = decodeURIComponent(approvalRoute[2]);
+            const row = approvals.get(`${targetRun.runId}:${key}`);
             return row ? send(200, row) : send(404, {});
-        }
-        if (path === `/internal/agency/runs/${RUN}/complete`) {
-            if (!fenced() || !live()) return send(409, {});
-            const done = body as { proposed: boolean; outcome?: string };
-            run.state = done.proposed ? "proposed" : (done.outcome ?? "failed");
-            return send(200, { status: "Ok" });
         }
         return send(404, {});
     });
@@ -210,6 +263,7 @@ async function fakeAfkAgency(options: { autoAnswer?: "approved" | "denied" } = {
         url: `http://127.0.0.1:${address.port}`,
         calls,
         run,
+        runs,
         approvals,
         of,
         progress: () =>
@@ -471,7 +525,7 @@ describe("Orkest AFK owner (GHO-189.3.1)", () => {
         ]);
     }, 120_000);
 
-    it("gives each run its own git worktree under the configured work root", async () => {
+    it("uses the configured repository directly without making a git worktree", async () => {
         const agency = await fakeAfkAgency({ autoAnswer: "approved" });
         const scratch = await mkdtemp(join(tmpdir(), "happy-afk-work-"));
         cleanups.push(async () => await rm(scratch, { recursive: true, force: true }));
@@ -483,19 +537,260 @@ describe("Orkest AFK owner (GHO-189.3.1)", () => {
         await writeFile(join(repo, "README.md"), "repo\n");
         git("add", ".");
         git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init");
-        const workRoot = join(scratch, "runs");
         const installation = await afkInstallation(agency.url, {
-            extra: { ORKEST_AFK_WORK_ROOT: workRoot, ORKEST_AFK_REPO: repo },
+            extra: { ORKEST_AFK_REPO: repo },
         });
         const runtime = await afkHappy(installation, new ScriptedProvider([textTurn("Done.")]));
         await expect.poll(() => agency.run.state, { timeout: 30_000 }).toBe("proposed");
-        const runDir = join(workRoot, afkFolderName(RUN));
-        expect(existsSync(join(runDir, ".git"))).toBe(true);
-        expect(await readFile(join(runDir, "README.md"), "utf8")).toBe("repo\n");
+        expect(await readFile(join(repo, "README.md"), "utf8")).toBe("repo\n");
         const task = await runtime.modules.tasks.get(dbCtx(runtime), afkDerivedId("t", RUN));
-        // The task folder is a link; remove it before its target so the suite root can be removed.
-        cleanups.push(async () => await unlink(task!.path).catch(() => rmdir(task!.path)));
-        expect(await realpath(task!.path)).toBe(await realpath(runDir));
+        expect(await realpath(task!.path)).not.toBe(await realpath(repo));
+        const worktrees = execFileSync("git", ["-C", repo, "worktree", "list", "--porcelain"], {
+            encoding: "utf8",
+        })
+            .split(/\r?\n/)
+            .filter((line) => line.startsWith("worktree "));
+        expect(worktrees).toEqual([`worktree ${(await realpath(repo)).replaceAll("\\", "/")}`]);
+    }, 90_000);
+
+    it("runs a mapped ticket inside its pinned project and applies its committed write rule", async () => {
+        const agency = await fakeAfkAgency({ autoAnswer: "approved", projectId: "film-1" });
+        const scratch = await mkdtemp(join(tmpdir(), "happy-afk-project-"));
+        cleanups.push(async () => await rm(scratch, { recursive: true, force: true }));
+        const writableRoot = join(scratch, "projects");
+        const repo = join(writableRoot, "film-one");
+        const output = join(repo, "output");
+        const deliverables = join(repo, "deliverables");
+        const privateFiles = join(repo, "private");
+        await mkdir(output, { recursive: true });
+        await mkdir(deliverables, { recursive: true });
+        await mkdir(privateFiles, { recursive: true });
+        const sibling = join(writableRoot, "film-two");
+        await mkdir(sibling, { recursive: true });
+        const escape = join(output, "alias");
+        await symlink(sibling, escape, "junction");
+        cleanups.push(
+            async () => await unlink(escape).catch(() => rmdir(escape).catch(() => undefined)),
+        );
+        const settingsPath = join(repo, ".claude", "settings.json");
+        const rolePath = join(repo, ".claude", "roles", "director.json");
+        await mkdir(dirname(settingsPath), { recursive: true });
+        await mkdir(dirname(rolePath), { recursive: true });
+        await writeFile(
+            settingsPath,
+            JSON.stringify({
+                permissions: {
+                    allow: ["Bash(git status:*)"],
+                    deny: ["Write(private/**)", "Write(.claude/**)"],
+                },
+            }),
+        );
+        await writeFile(
+            rolePath,
+            JSON.stringify({
+                permissions: {
+                    allow: ["Write(output/**)", "Write(deliverables/**)", "Write(private/**)"],
+                    deny: [],
+                },
+            }),
+        );
+        const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "pipe" });
+        git("init", "-q");
+        git("config", "core.autocrlf", "false");
+        git("add", ".");
+        git(
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "trusted settings",
+        );
+        const policyRevision = git("rev-parse", "HEAD").toString().trim();
+        await writeFile(
+            settingsPath,
+            JSON.stringify({ permissions: { allow: ["Write(denied/**)"] } }),
+        );
+        const projectsFile = join(scratch, "afk-projects.json");
+        await writeFile(
+            projectsFile,
+            JSON.stringify({
+                tenant: "tenant-1",
+                writableRoot,
+                projects: { "film-1": { path: repo, policyRevision, policyRole: "director" } },
+            }),
+        );
+        const installation = await afkInstallation(agency.url, {
+            extra: {
+                ORKEST_AFK_TENANT: "tenant-1",
+                ORKEST_AFK_PROJECTS_FILE: projectsFile,
+            },
+        });
+        const runtime = await afkHappy(
+            installation,
+            new ScriptedProvider([
+                writeHello(Promise.resolve(privateFiles)),
+                writeHello(Promise.resolve(escape), "callwrite2"),
+                writeHello(Promise.resolve(output), "callwrite3"),
+                writeHello(Promise.resolve(deliverables), "callwrite4"),
+                textTurn("Done."),
+            ]),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        expect(agency.run.state, JSON.stringify(runtime.modules.orkestAfk.status)).toBe("proposed");
+        expect(existsSync(join(output, "hello.txt")), JSON.stringify(agency.receipts())).toBe(true);
+        expect(await readFile(join(output, "hello.txt"), "utf8")).toBe("hello");
+        expect(await readFile(join(deliverables, "hello.txt"), "utf8")).toBe("hello");
+        expect(await readFile(join(privateFiles, "hello.txt")).catch(() => "")).toBe("");
+        expect(await readFile(join(sibling, "hello.txt")).catch(() => "")).toBe("");
+        expect(agency.of("/approvals")).toHaveLength(1);
+        expect(agency.progress()).toContain("Blocked outside the supported project scope: Write");
+        const task = await runtime.modules.tasks.get(dbCtx(runtime), afkDerivedId("t", RUN));
+        expect(await realpath(task!.path)).not.toBe(await realpath(repo));
+    }, 90_000);
+
+    it("asks before a confined read that the pinned project did not allow", async () => {
+        const agency = await fakeAfkAgency({ autoAnswer: "approved", projectId: "film-1" });
+        const scratch = await mkdtemp(join(tmpdir(), "happy-afk-read-"));
+        cleanups.push(async () => await rm(scratch, { recursive: true, force: true }));
+        const writableRoot = join(scratch, "projects");
+        const repo = join(writableRoot, "film-one");
+        await mkdir(join(repo, ".claude"), { recursive: true });
+        await writeFile(join(repo, "notes.txt"), "inside the assigned film");
+        await writeFile(
+            join(repo, ".claude", "settings.json"),
+            JSON.stringify({ permissions: { allow: [], deny: [] } }),
+        );
+        const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "pipe" });
+        git("init", "-q");
+        git("add", ".");
+        git(
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "trusted settings",
+        );
+        const projectsFile = join(scratch, "afk-projects.json");
+        await writeFile(
+            projectsFile,
+            JSON.stringify({
+                tenant: "tenant-1",
+                writableRoot,
+                projects: {
+                    "film-1": {
+                        path: repo,
+                        policyRevision: git("rev-parse", "HEAD").toString().trim(),
+                    },
+                },
+            }),
+        );
+        const installation = await afkInstallation(agency.url, {
+            extra: { ORKEST_AFK_TENANT: "tenant-1", ORKEST_AFK_PROJECTS_FILE: projectsFile },
+        });
+        const readTurn = () =>
+            (async function* () {
+                yield* toolCallTurn(
+                    "callread1",
+                    "Read",
+                    JSON.stringify({ file_path: join(repo, "notes.txt") }),
+                );
+            })();
+        const runtime = await afkHappy(
+            installation,
+            new ScriptedProvider([readTurn, textTurn("Done.")]),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        expect(agency.run.state, JSON.stringify(runtime.modules.orkestAfk.status)).toBe("proposed");
+        expect(agency.of("/approvals")).toHaveLength(1);
+        expect(agency.progress()).toContain("Approved: Read");
+    }, 90_000);
+
+    it("leaves a server-bound run pending when the trusted tenant map belongs to another tenant", async () => {
+        const agency = await fakeAfkAgency({ projectId: "film-1" });
+        const scratch = await mkdtemp(join(tmpdir(), "happy-afk-wrong-tenant-"));
+        cleanups.push(async () => await rm(scratch, { recursive: true, force: true }));
+        const projectsFile = join(scratch, "afk-projects.json");
+        await writeFile(
+            projectsFile,
+            JSON.stringify({ tenant: "other-tenant", writableRoot: scratch, projects: {} }),
+        );
+        const installation = await afkInstallation(agency.url, {
+            extra: { ORKEST_AFK_TENANT: "tenant-1", ORKEST_AFK_PROJECTS_FILE: projectsFile },
+        });
+        const runtime = await afkHappy(
+            installation,
+            new ScriptedProvider([textTurn("Do not start.")]),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 3_000));
+        expect(agency.run.state).toBe("admitted");
+        expect(agency.calls.some((call) => call.path.endsWith("/ack"))).toBe(false);
+        expect(agency.calls.some((call) => call.path.endsWith("/claim"))).toBe(false);
+        expect(runtime.modules.orkestAfk.status.lastError).toContain("does not match this worker");
+        expect(await runtime.modules.tasks.list(dbCtx(runtime))).toHaveLength(0);
+    }, 90_000);
+
+    it("continues other queued projects when one run has no trusted mapping", async () => {
+        const secondRunId = "0195f3a0-0000-7000-8000-000000000102";
+        const secondIntentId = "0195f3a0-0000-7000-8000-0000000001ab";
+        const agency = await fakeAfkAgency({
+            projectId: "film-missing",
+            additionalRuns: [
+                { runId: secondRunId, intentId: secondIntentId, projectId: "film-good" },
+            ],
+        });
+        const scratch = await mkdtemp(join(tmpdir(), "happy-afk-queue-"));
+        cleanups.push(async () => await rm(scratch, { recursive: true, force: true }));
+        const writableRoot = join(scratch, "projects");
+        const repo = join(writableRoot, "film-good");
+        await mkdir(join(repo, ".claude"), { recursive: true });
+        await writeFile(
+            join(repo, ".claude", "settings.json"),
+            JSON.stringify({ permissions: { allow: [], deny: [] } }),
+        );
+        const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "pipe" });
+        git("init", "-q");
+        git("add", ".");
+        git(
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "trusted settings",
+        );
+        const projectsFile = join(scratch, "afk-projects.json");
+        await writeFile(
+            projectsFile,
+            JSON.stringify({
+                tenant: "tenant-1",
+                writableRoot,
+                projects: {
+                    "film-good": {
+                        path: repo,
+                        policyRevision: git("rev-parse", "HEAD").toString().trim(),
+                    },
+                },
+            }),
+        );
+        const installation = await afkInstallation(agency.url, {
+            extra: { ORKEST_AFK_TENANT: "tenant-1", ORKEST_AFK_PROJECTS_FILE: projectsFile },
+        });
+        const runtime = await afkHappy(installation, new ScriptedProvider([textTurn("Done.")]));
+        const secondRun = agency.runs.find((candidate) => candidate.runId === secondRunId)!;
+        await expect.poll(() => secondRun.state, { timeout: 30_000 }).toBe("proposed");
+        expect(agency.run.state).toBe("admitted");
+        const acknowledgements = agency.of("/ack");
+        expect(acknowledgements).toHaveLength(1);
+        expect(acknowledgements[0]?.path).toBe(`/internal/agency/intents/${secondIntentId}/ack`);
+        expect(agency.receipts().map((receipt) => receipt.runId)).toEqual([secondRunId]);
+        expect(runtime.modules.orkestAfk.status.lastError).toContain(
+            "no valid trusted repository mapping",
+        );
     }, 90_000);
 
     it("refuses to own AFK runs unless the installation is attended-only", async () => {
