@@ -152,6 +152,10 @@ interface HeldRun {
     turns: number;
     text: string;
     lastText: string;
+    deadlineAt?: number;
+    deadlineExpired: boolean;
+    deadlineTimer?: ReturnType<typeof setTimeout>;
+    deadlineStop?: Promise<void>;
 }
 
 /**
@@ -205,6 +209,10 @@ export class OrkestAfkModule implements AgentModule {
                 if (held === undefined || held.ending !== undefined) return;
                 if (this.#stop.signal.aborted || hookCtx.lifetime?.aborted) return;
                 if (held.lost || held.stopRequested) return;
+                if (this.#deadlineReached(held)) {
+                    void this.#expireDeadline(held);
+                    return;
+                }
                 // Not awaited: the settlement hook must not wait on Orkest.
                 void this.#end(
                     held,
@@ -338,6 +346,8 @@ export class OrkestAfkModule implements AgentModule {
                     held.stopRequested = true;
                     await this.#end(held, "stopped");
                 }
+                if (held !== undefined && this.#deadlineReached(held))
+                    await this.#expireDeadline(held);
             } catch (error) {
                 if (isAbortedError(error) || this.#stop.signal.aborted) return;
                 failedRun = true;
@@ -359,6 +369,10 @@ export class OrkestAfkModule implements AgentModule {
         for (const held of this.#held.values()) {
             try {
                 if (held.ending !== undefined) continue;
+                if (this.#deadlineReached(held)) {
+                    await this.#expireDeadline(held);
+                    continue;
+                }
                 if (held.releaseProjectLock !== undefined && !held.releaseProjectLock.isHeld()) {
                     held.lost = true;
                     failedRun = true;
@@ -407,8 +421,20 @@ export class OrkestAfkModule implements AgentModule {
                 await this.#archive(ctx, task.id);
                 return;
             }
+            const attempt = await this.#acquireAttempt(client, run, lease.fence);
+            if (attempt.started === false) {
+                const held = this.#hold(run, task, lease.fence, project, releaseLock);
+                transferred = true;
+                await this.#end(held, "failed", "bounded run attempt was already consumed");
+                return;
+            }
             const held = this.#hold(run, task, lease.fence, project, releaseLock);
+            this.#setDeadline(held, attempt.deadlineAt);
             transferred = true;
+            if (attempt.deadlineAt !== undefined && attempt.deadlineAt <= Date.now()) {
+                await this.#expireDeadline(held);
+                return;
+            }
             await this.#sendBrief(ctx, held, mode, run);
             await this.#progress(held, "Started", true);
         } finally {
@@ -441,9 +467,19 @@ export class OrkestAfkModule implements AgentModule {
             }
             const lease = await client.claim(run.runId, LEASE_SECONDS);
             if (lease === undefined) return undefined;
+            const attempt = await this.#acquireAttempt(client, run, lease.fence);
             const task = await this.#task(ctx, endpoint, mode, run, project);
             const held = this.#hold(run, task, lease.fence, project, releaseLock);
+            this.#setDeadline(held, attempt.deadlineAt);
             transferred = true;
+            if (attempt.started === false) {
+                await this.#end(held, "failed", "bounded run attempt was already consumed");
+                return held;
+            }
+            if (attempt.deadlineAt !== undefined && attempt.deadlineAt <= Date.now()) {
+                await this.#expireDeadline(held);
+                return held;
+            }
             const brief = await this.#sendBrief(ctx, held, mode, run);
             if (brief === "existing") {
                 await this.#send(
@@ -511,9 +547,79 @@ export class OrkestAfkModule implements AgentModule {
             turns: 0,
             text: "",
             lastText: "",
+            deadlineExpired: false,
         };
         this.#held.set(run.runId, held);
         return held;
+    }
+
+    async #acquireAttempt(
+        client: OrkestAfkClient,
+        run: AfkRun,
+        fence: number,
+    ): Promise<{ started: boolean; deadlineAt?: number }> {
+        const bounded =
+            run.wallSeconds != null ||
+            run.maxAttempts != null ||
+            run.attemptStartedAt != null ||
+            run.deadlineAt != null;
+        if (!bounded) return { started: true };
+        if (
+            run.wallSeconds == null ||
+            !Number.isInteger(run.wallSeconds) ||
+            run.maxAttempts !== 1 ||
+            run.wallSeconds < 1 ||
+            run.wallSeconds > 900
+        ) {
+            throw new Error("Bounded AFK run has invalid limits.");
+        }
+        // A consumed attempt in the feed is never continued, even if an old API mishandles POST.
+        if (run.attemptStartedAt != null) {
+            return { started: false };
+        }
+        const requestStartedAt = Date.now();
+        const result = await client.acquireAttempt(run.runId, fence);
+        if (!result.started) return { started: false };
+        const deadline = Date.parse(result.deadlineAt ?? "");
+        if (!Number.isFinite(deadline))
+            throw new Error("Bounded AFK attempt returned no valid deadline.");
+        return {
+            started: true,
+            deadlineAt: Math.min(deadline, requestStartedAt + run.wallSeconds * 1_000),
+        };
+    }
+
+    #setDeadline(held: HeldRun, deadlineAt: number | undefined): void {
+        if (deadlineAt === undefined) return;
+        held.deadlineAt = deadlineAt;
+        const remaining = Math.max(0, deadlineAt - Date.now());
+        held.deadlineTimer = setTimeout(() => {
+            void this.#expireDeadline(held);
+        }, remaining);
+        held.deadlineTimer.unref?.();
+    }
+
+    #deadlineReached(held: HeldRun): boolean {
+        if (held.deadlineAt !== undefined && Date.now() >= held.deadlineAt)
+            held.deadlineExpired = true;
+        return held.deadlineExpired;
+    }
+
+    async #expireDeadline(held: HeldRun): Promise<void> {
+        if (held.deadlineStop !== undefined) return await held.deadlineStop;
+        held.deadlineExpired = true;
+        held.deadlineStop = (async () => {
+            const ctx = this.#root;
+            if (ctx !== undefined) {
+                try {
+                    await this.#agents?.abort(ctx, held.agentId);
+                } catch {
+                    /* already settled */
+                }
+            }
+            await this.#end(held, "failed", "bounded run deadline exceeded");
+        })();
+        await held.deadlineStop;
     }
 
     /** The run's task, created once: identities derived from the run make a repeat find it. */
@@ -618,8 +724,23 @@ export class OrkestAfkModule implements AgentModule {
     ): Promise<"created" | "existing"> {
         const agents = this.#agents;
         if (agents === undefined) throw new Error("The agent system is not ready.");
+        if (this.#deadlineReached(held)) {
+            void this.#expireDeadline(held);
+            throw new Error("The bounded run deadline passed before message dispatch.");
+        }
+        const sendCtx =
+            held.deadlineAt === undefined
+                ? ctx
+                : withLifetime(
+                      ctx,
+                      AbortSignal.any([
+                          ...(ctx.lifetime === undefined ? [] : [ctx.lifetime]),
+                          this.#stop.signal,
+                          AbortSignal.timeout(Math.max(1, held.deadlineAt - Date.now())),
+                      ]),
+                  );
         const acceptance = await agents.send(
-            ctx,
+            sendCtx,
             held.agentId,
             { role: "user", content: [{ type: "text", text }] },
             {
@@ -645,6 +766,10 @@ export class OrkestAfkModule implements AgentModule {
         if (held === undefined) return await this.#unheld(ctx, scope.agent.id);
         const tool = call.tool.name;
         const inputSha256 = createHash("sha256").update(stableJson(call.arguments)).digest("hex");
+        if (this.#deadlineReached(held)) {
+            void this.#expireDeadline(held);
+            return refusal("The bounded run deadline has passed. This action did not run.");
+        }
         if (held.ending !== undefined || held.lost || held.stopRequested) {
             return refusal("This Orkest run has ended; the action did not run. Stop.");
         }
@@ -778,6 +903,10 @@ export class OrkestAfkModule implements AgentModule {
             answeredBy: approval.answeredBy ?? null,
         });
         if (approval.state === "approved") {
+            if (this.#deadlineReached(held)) {
+                void this.#expireDeadline(held);
+                return refusal("The bounded run deadline has passed. This action did not run.");
+            }
             const approvedPathScope =
                 held.project === undefined
                     ? undefined
@@ -799,13 +928,14 @@ export class OrkestAfkModule implements AgentModule {
                 return refusal("The assigned project lock was lost. This action did not run.");
             }
             if (
-                held.project !== undefined &&
-                (deniedAfterApproval ||
-                    approvedPathScope?.inside !== true ||
-                    (!["Write", "Edit"].includes(tool) && !AFK_READ_ONLY_TOOLS.has(tool)) ||
-                    dangerousWrite ||
-                    ((tool === "Write" || tool === "Edit") &&
-                        approvedPathCandidates?.some(projectPathIsProtected) === true))
+                this.#deadlineReached(held) ||
+                (held.project !== undefined &&
+                    (deniedAfterApproval ||
+                        approvedPathScope?.inside !== true ||
+                        (!["Write", "Edit"].includes(tool) && !AFK_READ_ONLY_TOOLS.has(tool)) ||
+                        dangerousWrite ||
+                        ((tool === "Write" || tool === "Edit") &&
+                            approvedPathCandidates?.some(projectPathIsProtected) === true)))
             ) {
                 held.toolCalls.push({ tool, inputSha256, decision: "denied" });
                 await this.#progress(
@@ -842,11 +972,23 @@ export class OrkestAfkModule implements AgentModule {
                 : AbortSignal.any([ctx.lifetime, this.#stop.signal]);
         const waitCtx = withLifetime(ctx, lifetime);
         for (;;) {
-            if (held.lost || held.stopRequested || held.ending !== undefined || lifetime.aborted) {
+            if (
+                this.#deadlineReached(held) ||
+                held.lost ||
+                held.stopRequested ||
+                held.ending !== undefined ||
+                lifetime.aborted
+            ) {
                 return undefined;
             }
             await delay(waitCtx, APPROVAL_POLL_MS);
-            if (held.lost || held.stopRequested || held.ending !== undefined) return undefined;
+            if (
+                this.#deadlineReached(held) ||
+                held.lost ||
+                held.stopRequested ||
+                held.ending !== undefined
+            )
+                return undefined;
             let approval: AfkApproval | undefined;
             try {
                 approval = await client.approval(held.runId, key);
@@ -887,6 +1029,7 @@ export class OrkestAfkModule implements AgentModule {
     }
 
     async #finish(held: HeldRun, outcome: Outcome, error: string | undefined): Promise<void> {
+        if (held.deadlineTimer !== undefined) clearTimeout(held.deadlineTimer);
         const client = this.#client;
         const ctx = this.#root;
         if (client === undefined || ctx === undefined) return;

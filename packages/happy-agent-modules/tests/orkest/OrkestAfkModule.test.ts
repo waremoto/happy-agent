@@ -62,6 +62,7 @@ afterEach(async () => {
 interface Call {
     method: string;
     path: string;
+    query: string;
     body: unknown;
     serviceToken: string | undefined;
     workerToken: string | undefined;
@@ -90,6 +91,7 @@ async function fakeAfkAgency(
         autoAnswer?: "approved" | "denied";
         projectId?: string;
         additionalRuns?: Array<{ runId: string; intentId: string; projectId?: string }>;
+        bounded?: { wallSeconds: number; maxAttempts: number; started?: boolean };
     } = {},
 ) {
     const calls: Call[] = [];
@@ -113,6 +115,18 @@ async function fakeAfkAgency(
         ownerJobRef: null as string | null,
         leaseHolder: null as string | null,
         fence: 0,
+        wallSeconds: null as number | null,
+        maxAttempts: null as number | null,
+        attemptStartedAt: null as string | null,
+        deadlineAt: null as string | null,
+        ...(options.bounded === undefined
+            ? {}
+            : {
+                  wallSeconds: options.bounded.wallSeconds,
+                  maxAttempts: options.bounded.maxAttempts,
+                  attemptStartedAt: null as string | null,
+                  deadlineAt: null as string | null,
+              }),
     };
     const runs = [
         run,
@@ -130,6 +144,14 @@ async function fakeAfkAgency(
             ownerJobRef: null,
             leaseHolder: null,
             fence: 0,
+            ...(options.bounded === undefined
+                ? {}
+                : {
+                      wallSeconds: options.bounded.wallSeconds,
+                      maxAttempts: options.bounded.maxAttempts,
+                      attemptStartedAt: null,
+                      deadlineAt: null,
+                  }),
         })),
     ];
     const read = async (request: IncomingMessage) => {
@@ -147,6 +169,7 @@ async function fakeAfkAgency(
         calls.push({
             method: request.method ?? "",
             path: url.pathname,
+            query: url.search,
             body,
             serviceToken: header("x-ghost-service-token"),
             workerToken: header("x-orkest-worker-token"),
@@ -178,6 +201,23 @@ async function fakeAfkAgency(
                         ["dispatched", "running"].includes(candidate.state),
                 ),
             );
+        }
+        const attempt = /^\/internal\/agency\/afk\/([^/]+)\/attempt$/.exec(path);
+        if (attempt && request.method === "POST") {
+            if (!fenced() || !live()) return send(409, {});
+            const candidate = targetRun as typeof targetRun & {
+                wallSeconds?: number;
+                attemptStartedAt?: string | null;
+                deadlineAt?: string | null;
+            };
+            if (candidate.attemptStartedAt != null || options.bounded?.started === true) {
+                return send(200, { started: false, deadlineAt: candidate.deadlineAt ?? null });
+            }
+            candidate.attemptStartedAt = new Date().toISOString();
+            candidate.deadlineAt = new Date(
+                Date.now() + (candidate.wallSeconds ?? 1) * 1000,
+            ).toISOString();
+            return send(200, { started: true, deadlineAt: candidate.deadlineAt });
         }
         const ack = /^\/internal\/agency\/intents\/([^/]+)\/ack$/.exec(path);
         const ackRun = ack && runs.find((candidate) => candidate.intentId === ack[1]);
@@ -402,6 +442,62 @@ async function userTexts(runtime: HappyAgentRuntime): Promise<string[]> {
 }
 
 describe("Orkest AFK owner (GHO-189.3.1)", () => {
+    it("acquires a durable bounded attempt before starting, aborts at deadline and rejects later tools", async () => {
+        const agency = await fakeAfkAgency({
+            autoAnswer: "approved",
+            bounded: { wallSeconds: 8, maxAttempts: 1 },
+        });
+        const installation = await afkInstallation(agency.url);
+        let started!: (runtime: HappyAgentRuntime) => void;
+        const runtimeReady = new Promise<HappyAgentRuntime>((resolve) => (started = resolve));
+        const provider = new ScriptedProvider([writeHello(workDirOf(runtimeReady)), hangingTurn]);
+        const runtime = await afkHappy(installation, provider);
+        started(runtime);
+        await expect.poll(() => agency.run.state, { timeout: 20_000 }).toBe("failed");
+        const attemptIndex = agency.calls.findIndex((call) => call.path.endsWith("/attempt"));
+        expect(attemptIndex).toBeGreaterThan(-1);
+        expect(agency.calls[attemptIndex]?.body).toEqual({ fence: 1 });
+        expect(agency.calls.filter((call) => call.path.endsWith("/attempt"))).toHaveLength(1);
+        expect(agency.run.attemptStartedAt).toBeTruthy();
+        expect(agency.completes()[0]).toMatchObject({
+            proposed: false,
+            consumed: 1,
+            reason: "bounded run deadline exceeded",
+        });
+        expect(provider.sessions[0]?.requests.length).toBeGreaterThan(0);
+        const workDir = await workDirOf(Promise.resolve(runtime));
+        expect(await readFile(join(workDir, "hello.txt"), "utf8")).toBe("hello");
+        expect(
+            agency.calls.some(
+                (call) => call.path.endsWith("/pending") && call.query === "?bounded=true",
+            ),
+        ).toBe(true);
+        expect(
+            agency.calls.some(
+                (call) => call.path.endsWith("/active") && call.query === "?bounded=true",
+            ),
+        ).toBe(true);
+    }, 60_000);
+
+    it("settles a consumed bounded attempt on reclaim without sending a continuation", async () => {
+        const agency = await fakeAfkAgency({ bounded: { wallSeconds: 60, maxAttempts: 1 } });
+        const installation = await afkInstallation(agency.url);
+        const first = await afkHappy(installation, new ScriptedProvider([hangingTurn]));
+        await expect.poll(() => agency.run.attemptStartedAt, { timeout: 30_000 }).not.toBeNull();
+        await first.closeForTest();
+        const provider = new ScriptedProvider([textTurn("must not execute")]);
+        const second = await afkHappy(installation, provider);
+        await expect.poll(() => agency.run.state, { timeout: 30_000 }).toBe("failed");
+        expect(provider.sessions).toHaveLength(0);
+        expect(agency.calls.filter((call) => call.path.endsWith("/attempt"))).toHaveLength(1);
+        expect(await userTexts(second)).toHaveLength(0);
+        expect(agency.completes()[0]).toMatchObject({
+            proposed: false,
+            consumed: 1,
+            reason: "bounded run attempt was already consumed",
+        });
+    }, 90_000);
+
     it("drains a queued run into a derived task, works it, publishes a receipt and completes it as proposed", async () => {
         const agency = await fakeAfkAgency({ autoAnswer: "approved" });
         const installation = await afkInstallation(agency.url);

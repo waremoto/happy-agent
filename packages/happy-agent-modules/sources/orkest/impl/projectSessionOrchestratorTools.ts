@@ -55,6 +55,18 @@ export function projectSessionOrchestratorTools(
                 ticket: Type.String({ description: "The ticket identifier, for example ORKE-12" }),
                 mode: Type.Union([Type.Literal("afk"), Type.Literal("attended")]),
                 harness: Type.Optional(Type.Union([Type.Literal("claude"), Type.Literal("codex")])),
+                wallSeconds: Type.Optional(
+                    Type.Integer({
+                        minimum: 1,
+                        maximum: 900,
+                        description: "Hard AFK runtime limit in seconds",
+                    }),
+                ),
+                maxAttempts: Type.Optional(
+                    Type.Literal(1, {
+                        description: "Bounded AFK requests are limited to one execution attempt",
+                    }),
+                ),
                 why: Type.String({ description: "One sentence: why this run, now" }),
             }),
             true,

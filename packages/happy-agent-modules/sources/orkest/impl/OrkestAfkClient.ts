@@ -39,6 +39,12 @@ export const afkRunSchema = Type.Object({
     intentId: nullableString,
     ownerJobRef: nullableString,
     fence: Type.Number(),
+    wallSeconds: Type.Optional(
+        Type.Union([Type.Integer({ minimum: 1, maximum: 900 }), Type.Null()]),
+    ),
+    maxAttempts: Type.Optional(Type.Union([Type.Literal(1), Type.Null()])),
+    attemptStartedAt: Type.Optional(nullableString),
+    deadlineAt: Type.Optional(nullableString),
 });
 export type AfkRun = Static<typeof afkRunSchema>;
 
@@ -85,12 +91,26 @@ export class OrkestAfkClient {
     }
 
     async pending(): Promise<AfkRun[]> {
-        return runs(await this.#call("GET", "/internal/agency/afk/pending"));
+        return runs(await this.#call("GET", "/internal/agency/afk/pending?bounded=true"));
     }
 
     /** Runs held by this worker: acknowledged intent, dispatched or running. */
     async active(): Promise<AfkRun[]> {
-        return runs(await this.#call("GET", "/internal/agency/afk/active"));
+        return runs(await this.#call("GET", "/internal/agency/afk/active?bounded=true"));
+    }
+
+    async acquireAttempt(
+        runId: string,
+        fence: number,
+    ): Promise<{ started: boolean; deadlineAt: string | null }> {
+        const response = await this.#call("POST", `/internal/agency/afk/${enc(runId)}/attempt`, {
+            fence,
+        });
+        const schema = Type.Object({ started: Type.Boolean(), deadlineAt: nullableString });
+        if (response.status !== 200 || !Value.Check(schema, response.body)) {
+            throw new Error(`Orkest bounded attempt answered ${response.status}.`);
+        }
+        return response.body;
     }
 
     async acknowledge(intentId: string, ownerJobRef: string): Promise<AgencyAnswer> {
