@@ -183,7 +183,21 @@ describe.skipIf(!SPEC)("Orkest project session on Happy, real model turn (GHO-19
             let proposed = false;
             try {
                 await expect
-                    .poll(stateText, { timeout: 300_000, interval: 2_000 })
+                    .poll(
+                        async () => {
+                            if (
+                                reviewDraft &&
+                                (
+                                    await rt.modules.userInput.list(ctx, agentId, {
+                                        status: "pending",
+                                    })
+                                ).length > 0
+                            )
+                                return "held for operator input";
+                            return stateText();
+                        },
+                        { timeout: 300_000, interval: 2_000 },
+                    )
                     .toMatch(
                         /Proposed \d+ changes? to|already proposed|held for|unchanged|"type":"error"|"error":\{/,
                     );
@@ -192,6 +206,14 @@ describe.skipIf(!SPEC)("Orkest project session on Happy, real model turn (GHO-19
                 proposed = false;
             }
             const state = await stateText();
+            let diagnostic = state.slice(-400);
+            if (reviewDraft && !proposed) {
+                const pending = await rt.modules.userInput.list(ctx, agentId, {
+                    status: "pending",
+                });
+                const records = await rt.storage.persistence(agentId).load(ctx);
+                diagnostic = `pending user inputs=${pending.length}; persisted chat records=${records.length}`;
+            }
             reply = state.slice(-2500);
             const after = await readFile(copy, "utf8");
             check(
@@ -201,11 +223,7 @@ describe.skipIf(!SPEC)("Orkest project session on Happy, real model turn (GHO-19
                 after.includes(line) && after !== before,
                 after.slice(-300),
             );
-            check(
-                "the agent's own propose_document call answered Proposed",
-                proposed,
-                state.slice(-400),
-            );
+            check("the agent's own propose_document call answered Proposed", proposed, diagnostic);
             check(
                 "the turn ran on the native Claude Code harness",
                 /claude-code\//.test(state),
