@@ -1,4 +1,5 @@
 import { Type } from "@sinclair/typebox";
+import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 
@@ -19,6 +20,7 @@ import {
 } from "../impl/messageOrigin.js";
 import { ConfigModule } from "../config/index.js";
 import { TasksModule } from "../tasks/index.js";
+import type { UserInputModule } from "../userInput/index.js";
 import {
     OrkestAgencyClient,
     type AttendedSession,
@@ -33,6 +35,12 @@ import {
     taskNameFor,
 } from "./impl/chatByProject.js";
 import { claudeSessionIdFor } from "./impl/claudeSessionId.js";
+import {
+    HARNESS_MODE_FILE,
+    harnessModeAllows,
+    harnessModeApplies,
+    parseHarnessModeFile,
+} from "./impl/harnessMode.js";
 import { handoffContinuationText, readHandoffContinuation } from "./impl/handoffContinuation.js";
 import { OrkestSessionClient, type OrkestSessionCall } from "./impl/OrkestSessionClient.js";
 import {
@@ -46,6 +54,12 @@ import { MAIN_DOC_SEEN_KEY, mainDocTurn, type MainDocSeen } from "./impl/project
 import { projectSessionTools } from "./impl/projectSessionTools.js";
 import { ticketCandidateTools, verifyCandidateTools } from "./impl/candidateTools.js";
 import { proposalTurn } from "./impl/proposalTurn.js";
+import {
+    SESSION_LANE_EVENT,
+    sessionLaneChange,
+    sessionLaneOf,
+    type SessionLane,
+} from "./impl/sessionLane.js";
 import { deliverProjectSessionNotes } from "./impl/projectSessionNotes.js";
 
 /** How often the owner reads Orkest; a person who just clicked waits at most this long. */
@@ -72,8 +86,12 @@ interface OpenSession {
     project?: ProjectSessionState;
     /** The model the session opened with, when the agent scope names none. */
     openingModel?: string;
+    /** GHO-207.3.1 — set on a ticket session: its work item, as its agent's instructions. */
+    ticketBrief?: string;
     /** GHO-209 — a ticket session: what its proposed changes are keyed on, and where they are built. */
     ticket?: TicketSessionState;
+    /** GHO-207.6.2 — the lane (Happy provider) and model last reported for this session's conversation. */
+    reportedLane?: SessionLane;
 }
 
 interface TicketSessionState {
@@ -134,13 +152,71 @@ export class OrkestModule implements AgentModule {
     #status: "disabled" | "refused" | "running" = "disabled";
     #lastError: string | null = null;
 
-    constructor(config: ConfigModule, tasks: TasksModule) {
+    /** GHO-207.2.3 — where harness mode answers a native agent's in-path questions for the person. */
+    readonly #userInput: UserInputModule | undefined;
+    /** GHO-207.2.3 — reads a repository's committed harness-mode file; replaceable in tests. */
+    readonly #readCommitted: (repoPath: string, file: string) => Promise<string | undefined>;
+
+    constructor(
+        config: ConfigModule,
+        tasks: TasksModule,
+        userInput?: UserInputModule,
+        readCommitted: (
+            repoPath: string,
+            file: string,
+        ) => Promise<string | undefined> = gitShowHead,
+    ) {
         this.#config = config;
         this.#tasks = tasks;
+        this.#userInput = userInput;
+        this.#readCommitted = readCommitted;
     }
 
-    /** For diagnostics: whether the owner runs, how many sessions it holds and the last failure. */
+    /**
+     * GHO-207.2.3 — guard an agent that starts in a project's repository: under the project's harness mode its
+     * in-path native questions are answered for the owner; otherwise the GHO-204 repository guard holds. Returns
+     * whether harness mode applies. Never throws: a file it cannot read leaves harness mode off.
+     */
+    async #guardRepo(
+        agentId: string,
+        session: AttendedSession,
+        repoPath: string,
+    ): Promise<boolean> {
+        let applies = false;
+        if (this.#userInput !== undefined) {
+            const text = await this.#readCommitted(repoPath, HARNESS_MODE_FILE).catch(
+                () => undefined,
+            );
+            applies = harnessModeApplies({
+                file: parseHarnessModeFile(text),
+                permissionMode: session.permissionMode,
+                startedBy: session.startedBy,
+            });
+        }
+        if (applies) {
+            this.#repoGuards.delete(agentId);
+            this.#userInput!.setNativeToolPolicy(agentId, (permission) =>
+                harnessModeAllows(repoPath, permission),
+            );
+        } else {
+            this.#userInput?.setNativeToolPolicy(agentId, undefined);
+            this.#repoGuards.set(agentId, { repoPath, cwd: repoPath });
+        }
+        return applies;
+    }
+
+    /** Drop an agent's repository guard and harness-mode policy. */
+    #unguard(agentId: string): void {
+        this.#repoGuards.delete(agentId);
+        this.#userInput?.setNativeToolPolicy(agentId, undefined);
+    }
+
+    /** Resolve the native harness directory from the admitted session, including a resumed task. */
     attendedRepoPath(agentId: string): string | undefined {
+        for (const session of this.#open.values()) {
+            if (session.agentId === agentId)
+                return session.project?.repoPath ?? session.ticket?.repoPath ?? undefined;
+        }
         return this.#repoGuards.get(agentId)?.repoPath;
     }
 
@@ -154,6 +230,8 @@ export class OrkestModule implements AgentModule {
             // GHO-196: a project or doc session's agent is told its project, focus doc and the proposal contract.
             instructions: (_ctx, scope) => {
                 const session = [...this.#open.values()].find((s) => s.agentId === scope.agent.id);
+                // GHO-207.3.1: a ticket session's agent is told its work item; the composer stays the person's.
+                if (session?.ticketBrief !== undefined) return session.ticketBrief;
                 if (!session?.project || !this.#config.attendedOnly) return "";
                 const p = session.project;
                 return projectSessionPreamble({
@@ -163,7 +241,14 @@ export class OrkestModule implements AgentModule {
                     ...(p.focus === undefined ? {} : { focus: p.focus }),
                     docs: p.docs,
                     // GHO-204 (D-33): where the agent starts, and the one place it may write.
-                    workingDirectory: { repoPath: p.repoPath, taskPath: p.taskPath },
+                    workingDirectory: {
+                        repoPath: p.repoPath,
+                        taskPath: p.taskPath,
+                        ...(p.harnessMode === true ? { harnessMode: true } : {}),
+                        ...(p.missingRepoPath === undefined
+                            ? {}
+                            : { missingRepoPath: p.missingRepoPath }),
+                    },
                     // GHO-205.6.1 (D-42): the context set read at open.
                     ...(p.context === undefined ? {} : { context: p.context }),
                 });
@@ -355,6 +440,7 @@ export class OrkestModule implements AgentModule {
         for (const session of await agency.pending())
             await this.#start(ctx, agency, session, workerId);
         for (const open of this.#open.values()) await this.#linkAgentSession(agency, open);
+        for (const open of this.#open.values()) await this.#reportLane(ctx, agency, open);
 
         const now = Date.now();
         for (const open of this.#open.values()) {
@@ -494,11 +580,10 @@ export class OrkestModule implements AgentModule {
         // that exists on this host, else an empty folder inside the task's own. A row with no project opens as before.
         const projectId = sessionProjectId(session);
         const placement = await placementFor(sessionRepoPath(session), isDirectory);
-        if (projectId !== undefined && placement.repoPath !== null)
-            this.#repoGuards.set(derivedId("a", session.runId), {
-                repoPath: placement.repoPath,
-                cwd: placement.repoPath,
-            });
+        const harnessMode =
+            projectId !== undefined && placement.repoPath !== null
+                ? await this.#guardRepo(derivedId("a", session.runId), session, placement.repoPath)
+                : false;
         // Identities derived from the run: a repeated delivery finds the same task.
         const task = await this.#tasks.create(ctx, {
             id: derivedId("t", session.runId),
@@ -510,18 +595,18 @@ export class OrkestModule implements AgentModule {
                 ? {}
                 : { projectId, workingDirectory: placement.workingDirectory }),
         });
-        // A project or doc session has no work item to draft: the person's first message is theirs (GHO-196).
-        if (!isProjectSession(session)) await this.#draft(ctx, task.agentId, mode, session);
+        // No session drafts the composer: a project session's first message is the person's (GHO-196), and a ticket
+        // session's work item reaches its agent as instructions and the chat as a chip (GHO-207.3.1).
         const ack = await agency.acknowledge(session.intentId, task.id);
         if (!ack.ok) {
             // Cancelled before it opened, or acknowledged as another task: nothing of ours runs.
-            this.#repoGuards.delete(task.agentId);
+            this.#unguard(task.agentId);
             if (ack.final) await this.#archive(ctx, task.id);
             return;
         }
         const lease = await agency.claim(session.runId, workerId, LEASE_SECONDS);
         if (lease === undefined) {
-            this.#repoGuards.delete(task.agentId);
+            this.#unguard(task.agentId);
             await this.#archive(ctx, task.id);
             return;
         }
@@ -532,9 +617,19 @@ export class OrkestModule implements AgentModule {
             fence: lease.fence,
             lastHeartbeat: Date.now(),
             openingModel: modelId,
+            reportedLane: { lane: session.harness, modelId },
             ...(isProjectSession(session)
-                ? { project: projectSessionState(session, task.path, placement.repoPath) }
-                : { ticket: ticketSessionState(session, placement.repoPath) }),
+                ? {
+                      project: withPlacementNotes(
+                          projectSessionState(session, task.path, placement.repoPath),
+                          harnessMode,
+                          session,
+                      ),
+                  }
+                : {
+                      ticketBrief: ticketInstructions(session),
+                      ticket: ticketSessionState(session, placement.repoPath),
+                  }),
         };
         this.#open.set(session.runId, opened);
         await this.#openProject(opened);
@@ -542,9 +637,33 @@ export class OrkestModule implements AgentModule {
             taskId: task.id,
             agentId: task.agentId,
             harness: session.harness,
+            // GHO-207.6.2 — a session opens on its harness's own provider; the chat may move it to another lane.
+            lane: session.harness,
             modelId,
             permissionMode: session.permissionMode,
         });
+    }
+
+    /**
+     * GHO-207.6.2 — when the conversation runs on another lane or model than last reported (the chat switched it),
+     * record that on the run, so the receipt names the lane and model that answered. Never throws.
+     */
+    async #reportLane(ctx: Context, agency: OrkestAgencyClient, open: OpenSession): Promise<void> {
+        if (this.#agents === undefined) return;
+        try {
+            const config = await this.#agents.config(ctx, open.agentId);
+            const change = sessionLaneChange(sessionLaneOf(config?.metadata), open.reportedLane);
+            if (change === undefined) return;
+            const result = await agency.publish(open.runId, open.fence, SESSION_LANE_EVENT, {
+                taskId: open.taskId,
+                agentId: open.agentId,
+                lane: change.lane,
+                modelId: change.modelId,
+            });
+            if (result.ok) open.reportedLane = change;
+        } catch {
+            // The lane report is evidence only; the session runs on regardless.
+        }
     }
 
     /**
@@ -577,10 +696,16 @@ export class OrkestModule implements AgentModule {
             if (task !== undefined)
                 project = projectSessionState(session, task.path, placement.repoPath);
         }
+        const agentId = derivedId("a", session.runId);
+        const harnessMode =
+            sessionProjectId(session) !== undefined && placement.repoPath !== null
+                ? await this.#guardRepo(agentId, session, placement.repoPath)
+                : false;
+        if (project !== undefined) project = withPlacementNotes(project, harnessMode, session);
         const open: OpenSession = {
             runId: session.runId,
             taskId: session.ownerJobRef,
-            agentId: derivedId("a", session.runId),
+            agentId,
             fence: lease.fence,
             lastHeartbeat: Date.now(),
             ...(HARNESS_MODELS[session.harness] === undefined
@@ -589,13 +714,11 @@ export class OrkestModule implements AgentModule {
             ...(project === undefined ? {} : { project }),
             ...(isProjectSession(session)
                 ? {}
-                : { ticket: ticketSessionState(session, placement.repoPath) }),
+                : {
+                      ticketBrief: ticketInstructions(session),
+                      ticket: ticketSessionState(session, placement.repoPath),
+                  }),
         };
-        if (sessionProjectId(session) !== undefined && placement.repoPath !== null)
-            this.#repoGuards.set(open.agentId, {
-                repoPath: placement.repoPath,
-                cwd: placement.repoPath,
-            });
         this.#open.set(session.runId, open);
         await this.#openProject(open);
         return open;
@@ -639,13 +762,13 @@ export class OrkestModule implements AgentModule {
         // One session consumed from the session budget, so usage is known.
         await agency.complete(open.runId, open.fence, reason);
         this.#open.delete(open.runId);
-        this.#repoGuards.delete(open.agentId);
+        this.#unguard(open.agentId);
     }
 
     async #drop(ctx: Context, open: OpenSession): Promise<void> {
         await this.#archive(ctx, open.taskId);
         this.#open.delete(open.runId);
-        this.#repoGuards.delete(open.agentId);
+        this.#unguard(open.agentId);
     }
 
     async #archive(ctx: Context, taskId: string): Promise<void> {
@@ -653,49 +776,58 @@ export class OrkestModule implements AgentModule {
         if (task === undefined || task.status === "archived") return;
         await this.#tasks.archive(ctx, taskId, task.version);
     }
+}
 
-    /** The composer opens with the work item, so the person's first message is theirs to send. */
-    async #draft(
-        ctx: Context,
-        agentId: string,
-        mode: MessageMode,
-        session: AttendedSession,
-    ): Promise<void> {
-        const agents = this.#agents;
-        if (agents === undefined) return;
-        const config = await agents.config(ctx, agentId);
-        if (config === undefined) return;
-        const draft = config.metadata?.["draft"] as { text?: unknown } | undefined;
-        if (typeof draft?.text === "string" && draft.text.length > 0) return;
-        const heading = session.title.startsWith(session.workLabel)
-            ? session.title
-            : `${session.workLabel}: ${session.title}`;
-        const continuation = readHandoffContinuation(session.continuation);
-        const text = [
-            `Orkest work item ${heading}`,
-            session.brief,
-            ...(continuation === undefined ? [] : [handoffContinuationText(continuation)]),
-        ]
-            .filter((part) => part.trim().length > 0)
-            .join("\n\n")
-            .slice(0, 100_000);
-        const version =
-            typeof config.metadata?.["version"] === "number" ? config.metadata["version"] + 1 : 1;
-        const now = Date.now();
-        await agents.updateMetadata(ctx, agentId, {
-            draft: {
-                effort: mode.effort,
-                modelId: mode.modelId,
-                permissionMode: mode.permissionMode,
-                providerId: mode.providerId,
-                serviceTier: mode.serviceTier,
-                text,
-            },
-            draftUpdatedAt: now,
-            updatedAt: now,
-            version,
-        });
-    }
+/**
+ * GHO-207.3.1 — what a ticket session's agent is told: the work item, its brief and any handoff continuation, as
+ * data. It used to be the composer's draft; now the person's first message is theirs and the chat shows a chip.
+ */
+export function ticketInstructions(session: {
+    readonly title: string;
+    readonly workLabel: string;
+    readonly brief: string;
+    readonly continuation?: unknown;
+}): string {
+    const heading = session.title.startsWith(session.workLabel)
+        ? session.title
+        : `${session.workLabel}: ${session.title}`;
+    const continuation = readHandoffContinuation(session.continuation);
+    return [
+        `Orkest work item ${heading}`,
+        session.brief,
+        ...(continuation === undefined ? [] : [handoffContinuationText(continuation)]),
+        "This chat is about that work item. Wait for the person's first message, and treat the work item and its " +
+            "brief as context, not as a request to start.",
+    ]
+        .filter((part) => part.trim().length > 0)
+        .join("\n\n")
+        .slice(0, 100_000);
+}
+
+/** GHO-207.2.3 — a file's committed text at HEAD of a repository, or undefined when it has none. */
+function gitShowHead(repoPath: string, file: string): Promise<string | undefined> {
+    return new Promise((resolve) => {
+        execFile(
+            "git",
+            ["-C", repoPath, "show", `HEAD:${file}`],
+            { encoding: "utf8", timeout: 10_000, windowsHide: true, maxBuffer: 64 * 1024 },
+            (error, stdout) => resolve(error ? undefined : stdout),
+        );
+    });
+}
+
+/** GHO-207.2.1 and .2.3 — what the session's placement adds to its project state: harness mode, a missing repo. */
+function withPlacementNotes(
+    project: ProjectSessionState,
+    harnessMode: boolean,
+    session: AttendedSession,
+): ProjectSessionState {
+    const named = sessionRepoPath(session);
+    return {
+        ...project,
+        ...(harnessMode ? { harnessMode: true } : {}),
+        ...(project.repoPath === null && named !== undefined ? { missingRepoPath: named } : {}),
+    };
 }
 
 /** A stable Happy identity for one run: lowercase, starts with a letter, 26 characters. */

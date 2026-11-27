@@ -21,6 +21,10 @@ export interface ProjectSessionState {
     readonly taskPath: string;
     /** The repository the agent starts in (GHO-204); null when it starts in the empty project folder. */
     readonly repoPath: string | null;
+    /** GHO-207.2.3 — the project's harness mode applies to this session. */
+    harnessMode?: boolean;
+    /** GHO-207.2.1 — the repository Father named that is not on this host. */
+    missingRepoPath?: string;
     focus?: { readonly path: string; readonly rev: string; readonly text: string };
     /** Docs the project has; `null` when it has no repository Orkest can read. */
     docs: number | null;

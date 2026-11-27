@@ -713,7 +713,7 @@ export async function startHappyAgentRuntime(
             team,
         );
         registerShutdown("exportedBots", async () => await exportedBots.close());
-        const orkest = new OrkestModule(config, tasks);
+        const orkest = new OrkestModule(config, tasks, userInput);
         config.attendedRepoPath = (agentId) => orkest.attendedRepoPath(agentId);
         registerShutdown("orkest", async () => await orkest.close());
         const orkestAfk = new OrkestAfkModule(config, tasks);

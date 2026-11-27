@@ -3,9 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { AcpProvider } from "@slopus/happy-providers";
+import { withAgentConfig, withAgentContext } from "@slopus/happy-agent-base";
+import { createRootContext } from "@steve.kite/stdlib";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+    createForeignAgentProvider,
     foreignAgentRoutes,
     foreignAgentStart,
 } from "../../sources/config/impl/createForeignAgentProvider.js";
@@ -33,6 +36,40 @@ it("propagates attended-only policy to native harness starts", async () => {
 afterEach(async () => {
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
+
+it.each(["claude", "codex"])(
+    "uses the admitted repo on each %s turn after resuming an old task",
+    async (provider) => {
+        const directory = await root();
+        const harness = provider === "claude" ? "claude_code" : "codex_cli";
+        const config = await testConfigRootedAt(
+            directory,
+            `[providers.${provider}]\ntype = "${provider}"\n[harnesses.${harness}]\nproviders = ["${provider}"]\n`,
+        );
+        const route = foreignAgentRoutes(config.configuration).find(
+            (r) => r.provider.type === provider,
+        )!;
+        const task = join(directory, "task", "project");
+        const repo = join(directory, "repo");
+        const ctx = withAgentConfig(
+            withAgentContext(createRootContext(), {
+                id: "film-agent",
+                provider,
+                model: "model",
+                permissionMode: "workspace_write",
+            }),
+            { modules: { compute: { cwd: task } } },
+        );
+        let claimed = false;
+        const acp = createForeignAgentProvider(route, directory, undefined, (id) =>
+            claimed && id === "film-agent" ? repo : undefined,
+        );
+        expect(acp.options.environment(ctx).cwd).toBe(task);
+        claimed = true;
+        expect(acp.options.environment(ctx).cwd).toBe(repo);
+        expect(acp.options.environment(ctx).permissionMode).toBe("workspace_write");
+    },
+);
 
 async function root(): Promise<string> {
     const directory = await mkdtemp(join(tmpdir(), "harnesses-"));

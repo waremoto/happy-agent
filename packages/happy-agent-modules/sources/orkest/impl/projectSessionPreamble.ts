@@ -22,7 +22,14 @@ export interface ProjectSessionPreambleInput {
     /** How many docs the project has; `null` when it has no repository Orkest can read. */
     readonly docs: number | null;
     /** Where the agent starts (GHO-204): the project's repository, or null for the empty project folder. */
-    readonly workingDirectory?: { readonly repoPath: string | null; readonly taskPath: string };
+    readonly workingDirectory?: {
+        readonly repoPath: string | null;
+        readonly taskPath: string;
+        /** GHO-207.2.3 — the project's harness mode is on for this session: the agent works in the repository. */
+        readonly harnessMode?: boolean;
+        /** GHO-207.2.1 — the repository Father named that is not on this host (so the agent is not in it). */
+        readonly missingRepoPath?: string;
+    };
     /** GHO-205.6.1 — the context set read at open (D-42). */
     readonly context?: readonly ContextFile[];
 }
@@ -44,6 +51,11 @@ export function workingCopyName(docPath: string): string {
     return `doc/${docPath.replace(/^docs\//, "")}`;
 }
 
+/** GHO-207.2.1 — the sentence a person reads when the project's repository is not on the worker's host. */
+export function missingRepoNotice(repoPath: string): string {
+    return `Note: this project's repository (${repoPath}) is not on this host, so this chat is not running in the project folder.`;
+}
+
 export function projectSessionPreamble(input: ProjectSessionPreambleInput): string {
     const { scope } = input;
     const readOnly = input.permissionMode !== "workspace_write";
@@ -58,12 +70,18 @@ export function projectSessionPreamble(input: ProjectSessionPreambleInput): stri
         "Status is never evidence: a ticket, tracker or roadmap node is done only with something a person can open (a commit, a receipt, a promoted tracker). You never approve, accept, merge, start runs or change settings; when something waits for the person, say what and why.",
     );
     if (input.workingDirectory) {
-        const { repoPath, taskPath } = input.workingDirectory;
+        const { repoPath, taskPath, harnessMode, missingRepoPath } = input.workingDirectory;
         lines.push(
             repoPath === null
-                ? `This project has no repository on this host, so you start in an empty folder, ${taskPath}/project. Your only writable place is ${taskPath}/doc; propose doc changes with propose_document.`
-                : `You start in the project's repository at ${repoPath}. Read it freely. Never write, delete or run commands that change files there. Your only writable place is ${taskPath}/doc; propose doc changes with propose_document.`,
+                ? `Orkest could not resolve a local checkout for this project. You start in the task folder ${taskPath}/project. Your only writable place is ${taskPath}/doc; propose doc changes with propose_document.`
+                : harnessMode === true && !readOnly
+                  ? `You start in the project's repository at ${repoPath}, with the project's harness mode on: work here as Claude Code or Codex does in its project folder. Read, edit, run tests and gates, and commit locally without asking. Anything outside this folder, git push or any other remote git, deploys, network calls, package installs and secrets still go to the person as an approval card: when the person asks for one of them, run it and let the card ask. Doc proposals (propose_document) still work from ${taskPath}/doc.`
+                  : `You start in the project's repository at ${repoPath}. Read it freely. Never write, delete or run commands that change files there. Your only writable place is ${taskPath}/doc; propose doc changes with propose_document.`,
         );
+        if (repoPath === null && missingRepoPath !== undefined)
+            lines.push(
+                `${missingRepoNotice(missingRepoPath)} Begin your first reply with exactly that sentence, so the person knows.`,
+            );
     }
     if (input.docs === null) {
         lines.push(
