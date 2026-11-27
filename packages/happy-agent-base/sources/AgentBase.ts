@@ -2810,7 +2810,7 @@ export class AgentBase {
                     }
                 }
                 const response = await this.#span(ctx, "agent.inference", {}, (inferenceCtx) =>
-                    this.#requestInference(inferenceCtx, abortPromise),
+                    this.#requestInference(inferenceCtx, abortPromise, abort.signal),
                 );
                 // A cancellation arrived before the request was made, so the turn cycles rather
                 // than talking to a session it may no longer own.
@@ -3085,6 +3085,7 @@ export class AgentBase {
     async #requestInference(
         ctx: Context,
         abortPromise: Promise<typeof ABORTED>,
+        abortSignal: AbortSignal,
     ): Promise<
         | {
               readonly content: SessionAssistantBlock[];
@@ -3146,7 +3147,15 @@ export class AgentBase {
         if (this.#draining) return undefined;
         const steered = new AbortController();
         this.#steeredResponse = steered;
-        const stream = session.run(this.#workContext(ctx), {
+        // Providers own the inference stream and must be told when this turn is cancelled.
+        // `abortPromise` stops Happy from consuming the stream, but without carrying this signal
+        // in the provider context an in-flight HTTP request or model iterator could keep running
+        // after `AgentSystem.abort()` returned.
+        const streamContext = withLifetime(
+            this.#workContext(ctx),
+            ctx.lifetime === undefined ? abortSignal : AbortSignal.any([ctx.lifetime, abortSignal]),
+        );
+        const stream = session.run(streamContext, {
             context: {
                 instructions,
                 messages: this.#messagesForProvider(this.#messages),

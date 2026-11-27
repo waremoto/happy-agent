@@ -467,6 +467,14 @@ export class OrkestAfkModule implements AgentModule {
             }
             const lease = await client.claim(run.runId, LEASE_SECONDS);
             if (lease === undefined) return undefined;
+            if (run.stopRequestedAt !== null) {
+                const task = await this.#task(ctx, endpoint, mode, run, project);
+                const held = this.#hold(run, task, lease.fence, project, releaseLock);
+                held.stopRequested = true;
+                transferred = true;
+                await this.#end(held, "stopped");
+                return held;
+            }
             const attempt = await this.#acquireAttempt(client, run, lease.fence);
             const task = await this.#task(ctx, endpoint, mode, run, project);
             const held = this.#hold(run, task, lease.fence, project, releaseLock);

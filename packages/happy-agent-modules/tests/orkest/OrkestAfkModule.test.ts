@@ -393,15 +393,28 @@ async function afkHappy(
 const dbCtx = (runtime: HappyAgentRuntime) => withAgentDatabase(runtime.ctx, runtime.database);
 
 /** A turn that never finishes on its own: the run stays in flight until the runtime stops. */
-const hangingTurn: ScriptedTurn = (ctx: Context): SessionStream =>
-    (async function* () {
-        await new Promise<void>((resolve) => {
-            const lifetime = ctx.lifetime;
-            if (lifetime === undefined) return;
-            if (lifetime.aborted) resolve();
-            lifetime.addEventListener("abort", () => resolve(), { once: true });
-        });
-    })();
+function hangingTurn(onAbort?: () => void): ScriptedTurn {
+    return (ctx: Context): SessionStream =>
+        (async function* () {
+            await new Promise<void>((resolve) => {
+                const lifetime = ctx.lifetime;
+                if (lifetime === undefined) return;
+                if (lifetime.aborted) {
+                    onAbort?.();
+                    resolve();
+                    return;
+                }
+                lifetime.addEventListener(
+                    "abort",
+                    () => {
+                        onAbort?.();
+                        resolve();
+                    },
+                    { once: true },
+                );
+            });
+        })();
+}
 
 /** The Write call a scripted model makes once the run's work directory is known. */
 function writeHello(workDir: Promise<string>, callId = "callwrite1"): ScriptedTurn {
@@ -448,12 +461,19 @@ describe("Orkest AFK owner (GHO-189.3.1)", () => {
             bounded: { wallSeconds: 8, maxAttempts: 1 },
         });
         const installation = await afkInstallation(agency.url);
+        let providerAbortObserved = false;
         let started!: (runtime: HappyAgentRuntime) => void;
         const runtimeReady = new Promise<HappyAgentRuntime>((resolve) => (started = resolve));
-        const provider = new ScriptedProvider([writeHello(workDirOf(runtimeReady)), hangingTurn]);
+        const provider = new ScriptedProvider([
+            writeHello(workDirOf(runtimeReady)),
+            hangingTurn(() => {
+                providerAbortObserved = true;
+            }),
+        ]);
         const runtime = await afkHappy(installation, provider);
         started(runtime);
-        await expect.poll(() => agency.run.state, { timeout: 20_000 }).toBe("failed");
+        await expect.poll(() => agency.run.state, { timeout: 60_000 }).toBe("failed");
+        await expect.poll(() => providerAbortObserved, { timeout: 10_000 }).toBe(true);
         const attemptIndex = agency.calls.findIndex((call) => call.path.endsWith("/attempt"));
         expect(attemptIndex).toBeGreaterThan(-1);
         expect(agency.calls[attemptIndex]?.body).toEqual({ fence: 1 });
@@ -482,7 +502,7 @@ describe("Orkest AFK owner (GHO-189.3.1)", () => {
     it("settles a consumed bounded attempt on reclaim without sending a continuation", async () => {
         const agency = await fakeAfkAgency({ bounded: { wallSeconds: 60, maxAttempts: 1 } });
         const installation = await afkInstallation(agency.url);
-        const first = await afkHappy(installation, new ScriptedProvider([hangingTurn]));
+        const first = await afkHappy(installation, new ScriptedProvider([hangingTurn()]));
         await expect.poll(() => agency.run.attemptStartedAt, { timeout: 30_000 }).not.toBeNull();
         await first.closeForTest();
         const provider = new ScriptedProvider([textTurn("must not execute")]);
@@ -582,7 +602,7 @@ describe("Orkest AFK owner (GHO-189.3.1)", () => {
     it("marks the daemon's own environment as unattended, so the Orkest helper in its shells knows", async () => {
         const agency = await fakeAfkAgency();
         const installation = await afkInstallation(agency.url);
-        await afkHappy(installation, new ScriptedProvider([hangingTurn]));
+        await afkHappy(installation, new ScriptedProvider([hangingTurn()]));
         // Agent shells inherit this process environment; `orkest.py` reads the variable (Rule 24).
         await expect.poll(() => process.env.ORKEST_AFK_RUN, { timeout: 60_000 }).toBe("1");
     }, 90_000);
@@ -590,7 +610,7 @@ describe("Orkest AFK owner (GHO-189.3.1)", () => {
     it("reclaims its run after a restart with a higher fence, without re-sending the brief or opening a second task", async () => {
         const agency = await fakeAfkAgency({ autoAnswer: "approved" });
         const installation = await afkInstallation(agency.url);
-        const first = await afkHappy(installation, new ScriptedProvider([hangingTurn]));
+        const first = await afkHappy(installation, new ScriptedProvider([hangingTurn()]));
         await expect.poll(() => agency.progress()[0], { timeout: 30_000 }).toBe("Started");
         expect(agency.run.fence).toBe(1);
         await first.closeForTest();
@@ -620,6 +640,36 @@ describe("Orkest AFK owner (GHO-189.3.1)", () => {
             { fence: 2, proposed: true, consumed: 1, reason: "done" },
         ]);
     }, 120_000);
+
+    it("settles a stopped active run before acquiring its first bounded attempt", async () => {
+        const agency = await fakeAfkAgency({ bounded: { wallSeconds: 60, maxAttempts: 1 } });
+        agency.run.state = "running";
+        agency.run.intent = "acknowledged";
+        agency.run.intentId = null;
+        agency.run.ownerJobRef = afkDerivedId("t", RUN);
+        agency.run.stopRequestedAt = new Date().toISOString();
+        const installation = await afkInstallation(agency.url);
+        const provider = new ScriptedProvider([textTurn("This must not be sent.")]);
+        const runtime = await afkHappy(installation, provider);
+
+        await expect.poll(() => agency.run.state, { timeout: 30_000 }).toBe("declined");
+        expect(agency.of("/claim")).toHaveLength(1);
+        expect(agency.of("/attempt")).toHaveLength(0);
+        expect(provider.sessions.flatMap((session) => session.requests)).toHaveLength(0);
+        expect(agency.receipts()[0]).toMatchObject({ runId: RUN, outcome: "stopped" });
+        expect(agency.completes()).toEqual([
+            {
+                fence: 1,
+                proposed: false,
+                consumed: 1,
+                reason: "stopped_by_person",
+                outcome: "declined",
+            },
+        ]);
+        expect(
+            (await runtime.modules.tasks.get(dbCtx(runtime), afkDerivedId("t", RUN)))?.status,
+        ).toBe("archived");
+    }, 90_000);
 
     it("uses the configured repository directly without making a git worktree", async () => {
         const agency = await fakeAfkAgency({ autoAnswer: "approved" });
@@ -1140,7 +1190,7 @@ describe("Orkest AFK tool policy (GHO-189.3.2)", () => {
     it("ends the run when a person asks Orkest to stop it", async () => {
         const agency = await fakeAfkAgency();
         const installation = await afkInstallation(agency.url);
-        const runtime = await afkHappy(installation, new ScriptedProvider([hangingTurn]));
+        const runtime = await afkHappy(installation, new ScriptedProvider([hangingTurn()]));
         await expect.poll(() => agency.progress()[0], { timeout: 30_000 }).toBe("Started");
         agency.run.stopRequestedAt = new Date().toISOString();
 

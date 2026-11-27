@@ -50,6 +50,51 @@ function toolCallTurn(callId: string, name: string, argumentsJson: string): Sess
 }
 
 describe("Agent", () => {
+    it("aborts the provider stream through its context lifetime", async () => {
+        const provider = new ScriptedProvider([]);
+        const createSession = provider.session.bind(provider);
+        let providerStarted = false;
+        let providerAbortObserved = false;
+        provider.session = async (id, options) => {
+            const session = (await createSession(id, options)) as ScriptedSession;
+            session.run = (runCtx) => {
+                providerStarted = true;
+                return (async function* () {
+                    await new Promise<void>((resolve) => {
+                        if (runCtx.lifetime?.aborted) {
+                            providerAbortObserved = true;
+                            resolve();
+                            return;
+                        }
+                        runCtx.lifetime?.addEventListener(
+                            "abort",
+                            () => {
+                                providerAbortObserved = true;
+                                resolve();
+                            },
+                            { once: true },
+                        );
+                    });
+                })();
+            };
+            return session;
+        };
+        const agent = await Agent.create(ctx, {
+            id: "aborted-provider-stream",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            sharedKV: sharedKV(),
+        });
+
+        await agent.send(ctx, user("wait until cancelled"));
+        await expect.poll(() => providerStarted).toBe(true);
+        await agent.abort(ctx);
+        await expect.poll(() => providerAbortObserved).toBe(true);
+        await agent.waitForIdle();
+        await agent.close();
+    });
+
     it("preserves each tool's Auto review and Full-access policy through module assembly", async () => {
         const provider = new ScriptedProvider([textTurn("answer")]);
         const reviewedTool = defineAgentTool({

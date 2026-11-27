@@ -43,6 +43,9 @@ self-start or a stale permission:
 
 ## Orkest base release `0.0.67-orkest.1`
 
+This section records the historical restart release and its 2026-11-12 approval. It does not
+cover the later provider-cancellation change below.
+
 `packages/happy-agent-base` is frozen (AGENTS.md, "happy-agent-base is frozen": no change without
 direct human input in the current task). The operator gave that input on 2026-11-12, relayed by the
 Orkest parent session: "Yes, take 3cd056c (Recommended)", covering the restart change on
@@ -66,6 +69,19 @@ Orkest parent session: "Yes, take 3cd056c (Recommended)", covering the restart c
   the gym helper removes its temporary directory; the unmodified upstream
   `AgentPersistenceDrizzlePrefix.test.ts` fails the same way. With only that teardown error ignored,
   both restart tests pass.
+
+## Local provider-cancellation candidate `0.0.67-orkest.2`
+
+The `.2` tarball carries the additional `AgentBase` change that forwards the active turn abort
+signal into the provider stream context. The original `.1` artifact and its historical approval
+remain intact. The `.2` candidate is local and unapproved for deployment or external publication;
+it was added for bounded AFK cancellation verification.
+
+- **Where it lives.** `vendor/slopus-happy-agent-base-0.0.67-orkest.2.tgz`, sha256
+  `DD5984DD704635D6BEB3A53460B003670494E3759809CCF90FBEFD54FE928569`.
+- **Verification.** Base `Agent.test.ts` passes 24/24; the Happy AFK suite passes 20/20, including
+  a bounded deadline assertion that the scripted provider observes abort. These checks verify the
+  local candidate only; using it in a runtime rollout needs a separate operator decision.
 
 ## Gaps
 
