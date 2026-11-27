@@ -145,6 +145,18 @@ async function readTool(
     ) {
         const doc = answer.body as { path?: unknown; text?: unknown; rev?: unknown };
         if (isDocPath(doc.path) && typeof doc.text === "string" && typeof doc.rev === "string") {
+            const draft = await readWorkingCopy(input.taskPath, doc.path);
+            if (draft !== undefined && draft !== doc.text) {
+                const base = await baseFor(input.taskPath, doc.path);
+                if (base === doc.rev)
+                    return clip(
+                        `The Board still has revision ${doc.rev}. Your edits remain in ${workingCopyName(doc.path)}.\n${JSON.stringify(answer.body)}`,
+                    );
+                await refreshStale(input.taskPath, doc.path, doc.rev, doc.text);
+                return clip(
+                    `The Board revision changed to ${doc.rev}. Your previous copy is saved in doc/.stale/ and ${workingCopyName(doc.path)} holds the current revision.\n${JSON.stringify(answer.body)}`,
+                );
+            }
             await writeWorkingCopy(input.taskPath, doc.path, doc.text, doc.rev);
             return clip(
                 `Working copy written: ${workingCopyName(doc.path)} (rev ${doc.rev}). Edit that file, then call propose_document.\n${JSON.stringify(answer.body)}`,
@@ -198,7 +210,13 @@ async function propose(
             return `${path} does not exist yet, so the person was asked to approve creating it. Nothing exists until they approve. Tell them it is waiting for their approval.`;
         if (body.state === "unchanged")
             return `Your working copy of ${path} is the same as the doc: nothing to propose.`;
-        const changes = typeof body.changes === "number" ? body.changes : 0;
+        if (typeof body.changes !== "number" || !Number.isInteger(body.changes) || body.changes < 1)
+            return `The Board did not confirm any reviewable changes to ${path}. Your working copy is preserved.`;
+        const changes = body.changes;
+        if (body.state === "applied") {
+            const result = body as { committed?: boolean };
+            return `Applied ${changes} change(s) to ${path} in the edit room. ${result.committed ? "Saved on the document edit branch." : "The edit branch save has not been confirmed."}`;
+        }
         return `Proposed ${changes} change${changes === 1 ? "" : "s"} to ${path}. They show on the Board as marks the person can accept by section or reject; nothing is written until they accept.${body.large === true ? " The change removes more than half of the text, so it is flagged as large." : ""}`;
     }
     if (answer.error === "stale_base") {

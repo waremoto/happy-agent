@@ -140,6 +140,10 @@ export class OrkestModule implements AgentModule {
     }
 
     /** For diagnostics: whether the owner runs, how many sessions it holds and the last failure. */
+    attendedRepoPath(agentId: string): string | undefined {
+        return this.#repoGuards.get(agentId)?.repoPath;
+    }
+
     get status(): { state: string; sessions: number; lastError: string | null } {
         return { state: this.#status, sessions: this.#open.size, lastError: this.#lastError };
     }

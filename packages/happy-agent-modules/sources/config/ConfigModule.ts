@@ -2201,6 +2201,7 @@ export class ConfigModule implements AgentModule {
      * agents keep their mode's own answer.
      */
     #userInput: UserInputModule | undefined;
+    attendedRepoPath?: (agentId: string) => string | undefined;
 
     /** Lets Claude Code and Codex ask the person about actions outside their permission mode. */
     useUserInput(userInput: UserInputModule): void {
@@ -3592,6 +3593,7 @@ export class ConfigModule implements AgentModule {
                 this.#credentialFailures,
                 this.#accountFailures,
                 () => this.#userInput,
+                (id) => this.attendedRepoPath?.(id),
             );
             // A test-owned inference registry is already authenticated. Initialize all its
             // accounts as usable, including canonical IDs whose production defaults are off. This

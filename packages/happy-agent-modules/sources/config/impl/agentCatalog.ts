@@ -585,6 +585,7 @@ export function agentProviders(
     credentialFailures?: ProviderCredentialFailures,
     accountFailures?: ProviderAccountFailures,
     userInput?: () => UserInputModule | undefined,
+    attendedRepoPath?: (agentId: string) => string | undefined,
 ): AgentProviders {
     const providers = new AgentProviders();
     const retryLimit = configuration.values.settings.inferenceMaxRetries;
@@ -638,6 +639,7 @@ export function agentProviders(
                                   foreign,
                                   configuration.paths.agentHome,
                                   userInput,
+                                  attendedRepoPath,
                               )
                             : await createProvider(
                                   id,

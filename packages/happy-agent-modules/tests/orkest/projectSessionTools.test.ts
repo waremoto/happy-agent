@@ -21,10 +21,17 @@ afterEach(async () => {
     for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
-async function proposeWith(answer: OrkestSessionAnswer): Promise<{ text: string; sent: OrkestProposalInput[] }> {
+async function proposeWith(
+    answer: OrkestSessionAnswer,
+): Promise<{ text: string; sent: OrkestProposalInput[] }> {
     const taskPath = await mkdtemp(join(tmpdir(), "happy-ps-tools-"));
     dirs.push(taskPath);
-    await writeWorkingCopy(taskPath, "docs/botanic/note-1.md", "# Note\n\n[0:42] the key point, shorter\n", "a".repeat(40));
+    await writeWorkingCopy(
+        taskPath,
+        "docs/botanic/note-1.md",
+        "# Note\n\n[0:42] the key point, shorter\n",
+        "a".repeat(40),
+    );
     const sent: OrkestProposalInput[] = [];
     const client = {
         propose: async (_call: unknown, input: OrkestProposalInput) => {
@@ -44,11 +51,23 @@ async function proposeWith(answer: OrkestSessionAnswer): Promise<{ text: string;
         turn: async () => "t1",
     });
     const tool = tools.find((t) => t.name === "propose_document")!;
-    const text = (await tool.execute({} as Context, { path: "docs/botanic/note-1.md", why: "shorter" }, {} as never)) as string;
+    const text = (await tool.execute(
+        {} as Context,
+        { path: "docs/botanic/note-1.md", why: "shorter" },
+        {} as never,
+    )) as string;
     return { text, sent };
 }
 
 describe("propose_document refusals", () => {
+    it("never reports an empty receipt as a posted proposal", async () => {
+        const { text } = await proposeWith({
+            ok: true,
+            status: 200,
+            body: { state: "proposed", changes: 0 },
+        });
+        expect(text).toContain("did not confirm any reviewable changes");
+    });
     it("says in plain words that a note read only for AI cannot be proposed to", async () => {
         const { text, sent } = await proposeWith({
             ok: false,
@@ -64,7 +83,11 @@ describe("propose_document refusals", () => {
     });
 
     it("keeps the existing answers (a turn that already proposed)", async () => {
-        const { text } = await proposeWith({ ok: false, status: 409, error: "already_proposed_this_turn" });
+        const { text } = await proposeWith({
+            ok: false,
+            status: 409,
+            error: "already_proposed_this_turn",
+        });
         expect(text).toMatch(/one proposal per turn/);
     });
 });

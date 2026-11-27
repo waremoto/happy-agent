@@ -123,12 +123,14 @@ export function createForeignAgentProvider(
     route: ForeignAgentRoute,
     agentHome: string,
     userInput?: () => UserInputModule | undefined,
+    attendedRepoPath?: (agentId: string) => string | undefined,
 ): AcpProvider {
     const directory = foreignAgentDirectory(agentHome, route);
     return new AcpProvider({
         connect: route.agent.connect(foreignAgentStart(route)),
         stateDirectory: directory,
-        environment: (ctx) => foreignAgentTurnEnvironment(ctx, directory, route, userInput?.()),
+        environment: (ctx) =>
+            foreignAgentTurnEnvironment(ctx, directory, route, userInput?.(), attendedRepoPath),
         profile: route.agent.profile,
     });
 }
@@ -231,12 +233,15 @@ function foreignAgentTurnEnvironment(
     stateDirectory: string,
     route: ForeignAgentRoute,
     userInput: UserInputModule | undefined,
+    attendedRepoPath?: (agentId: string) => string | undefined,
 ): AcpTurnEnvironment {
     const compute = agentModuleConfig(ctx, "compute");
     if (typeof compute?.["cwd"] === "string" && compute["cwd"].length > 0) {
         const askPerson = foreignAgentAskPerson(ctx, route, userInput);
         return {
-            cwd: compute["cwd"],
+            // Resumed tasks retain the compute directory from when they were created.
+            // Use the current owner feed's verified placement for their native harness.
+            cwd: attendedRepoPath?.(agentId(ctx) ?? "") ?? compute["cwd"],
             permissionMode: agentPermissionMode(ctx),
             ...(askPerson === undefined ? {} : { askPerson }),
         };
