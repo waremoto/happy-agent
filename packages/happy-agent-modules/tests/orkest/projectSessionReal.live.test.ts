@@ -125,23 +125,26 @@ describe.skipIf(!SPEC)("Orkest project session on Happy, real model turn (GHO-19
             check("the worker opens the happy project session with its working copy", true);
 
             // The person approves the agent's edits of its own working copy, once each.
-            tick = setInterval(async () => {
-                const pending = await rt.modules.userInput
-                    .list(ctx, agentId, { status: "pending" })
-                    .catch(() => []);
-                for (const question of pending) {
-                    if (answered.includes(question.id)) continue;
-                    answered.push(question.id);
-                    await rt.modules.userInput
-                        .answer(ctx, agentId, {
-                            requestId: question.id,
-                            answers: { approval: "Allow once" },
-                        })
-                        .catch(() => undefined);
-                }
-            }, 500);
+            const reviewDraft = process.env.GHO207_REVIEW_DRAFT === "1";
+            if (!reviewDraft)
+                tick = setInterval(async () => {
+                    const pending = await rt.modules.userInput
+                        .list(ctx, agentId, { status: "pending" })
+                        .catch(() => []);
+                    for (const question of pending) {
+                        if (answered.includes(question.id)) continue;
+                        answered.push(question.id);
+                        await rt.modules.userInput
+                            .answer(ctx, agentId, {
+                                requestId: question.id,
+                                answers: { approval: "Allow once" },
+                            })
+                            .catch(() => undefined);
+                    }
+                }, 500);
 
             const line = `- SYN ${spec.tag}: proposed by a real Happy project session turn (GHO-196.4.3).`;
+            if (reviewDraft) await writeFile(copy, before.trimEnd() + "\n\n" + line + "\n", "utf8");
             await rt.system.send(
                 ctx,
                 agentId,
@@ -150,15 +153,17 @@ describe.skipIf(!SPEC)("Orkest project session on Happy, real model turn (GHO-19
                     content: [
                         {
                             type: "text",
-                            text: [
-                                `SYN ${spec.tag}. Append exactly this line at the end of your working copy of ${spec.doc}`,
-                                `(the file doc/${spec.doc.slice(5)} in your folder), changing nothing else:`,
-                                "",
-                                line,
-                                "",
-                                `Then call propose_document with path "${spec.doc}" and why "${spec.tag}: add a SYN line".`,
-                                "Reply with the tool's answer in one sentence.",
-                            ].join("\n"),
+                            text: reviewDraft
+                                ? `SYN ${spec.tag}. The person's edited working copy is ready. Call propose_document once with path "${spec.doc}" and why "${spec.tag}: review the prepared draft". Use no other tools. Report the receipt.`
+                                : [
+                                      `SYN ${spec.tag}. Append exactly this line at the end of your working copy of ${spec.doc}`,
+                                      `(the file doc/${spec.doc.slice(5)} in your folder), changing nothing else:`,
+                                      "",
+                                      line,
+                                      "",
+                                      `Then call propose_document with path "${spec.doc}" and why "${spec.tag}: add a SYN line".`,
+                                      "Reply with the tool's answer in one sentence.",
+                                  ].join("\n"),
                         },
                     ],
                 },
@@ -182,7 +187,7 @@ describe.skipIf(!SPEC)("Orkest project session on Happy, real model turn (GHO-19
                     .toMatch(
                         /Proposed \d+ changes? to|already proposed|held for|unchanged|"type":"error"|"error":\{/,
                     );
-                proposed = /Proposed \d+ changes? to/.test(await stateText());
+                proposed = /Proposed [1-9]\d* changes? to/.test(await stateText());
             } catch {
                 proposed = false;
             }
@@ -190,7 +195,9 @@ describe.skipIf(!SPEC)("Orkest project session on Happy, real model turn (GHO-19
             reply = state.slice(-2500);
             const after = await readFile(copy, "utf8");
             check(
-                "the agent edited its working copy (the SYN line is in it)",
+                reviewDraft
+                    ? "the prepared working copy is preserved"
+                    : "the agent edited its working copy (the SYN line is in it)",
                 after.includes(line) && after !== before,
                 after.slice(-300),
             );
